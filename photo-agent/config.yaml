@@ -1,0 +1,24 @@
+project:
+  name: photo-agent
+  version: "0.1.0"
+
+input:
+  dir: ""
+  extensions: [jpg, jpeg, heic, png, webp, tiff, bmp]
+  ignore_dirs: [".git", "__MACOSX", "work", "reports"]
+
+thumbnail:
+  size: 256
+
+output:
+  db: photo.db
+  work_dir: work
+  reports_dir: reports
+
+vlm:
+  provider: openai
+  endpoint: ""
+  model: ""
+
+logging:
+  level: INFO
