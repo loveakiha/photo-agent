@@ -4,3 +4,4 @@ __pycache__/
 photo.db
 work/
 reports/
+.pytest_cache/
