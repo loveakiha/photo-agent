@@ -6,8 +6,9 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from database import upsert_photo
+from database import has_photo_hashes, upsert_photo, upsert_photo_hashes
 from exif import read_photo_meta
+from hashes import HASH_VERSION, compute_hashes
 from thumbnails import make_thumbnail
 
 _CHUNK = 1 << 20
@@ -51,6 +52,9 @@ def scan(
         "updated": 0,
         "thumb_ok": 0,
         "thumb_fail": 0,
+        "hash_ok": 0,
+        "hash_fail": 0,
+        "hash_skipped": 0,
     })
     total = 0
 
@@ -83,6 +87,26 @@ def scan(
             file_mtime=meta.get("file_mtime"),
         )
         stats[action] += 1
+
+        # M1: perceptual hashes, cached per photo_id. A cache row is only
+        # valid for the current algorithm version (HASH_VERSION); rows
+        # left over from an older version (NULL after M0 -> M1 upgrade, or
+        # a previous m1-vX) are recomputed and overwritten by the upsert.
+        if has_photo_hashes(conn, photo_id, HASH_VERSION):
+            stats["hash_skipped"] += 1
+        else:
+            pair = compute_hashes(path)
+            if pair is None:
+                stats["hash_fail"] += 1
+            else:
+                upsert_photo_hashes(
+                    conn,
+                    photo_id,
+                    pair["phash"],
+                    pair["dhash"],
+                    HASH_VERSION,
+                )
+                stats["hash_ok"] += 1
 
         thumb_ok = make_thumbnail(
             path,

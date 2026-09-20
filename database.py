@@ -5,8 +5,13 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _MIGRATIONS = Path(__file__).resolve().parent / "migrations"
+# version -> migration script; applied once per version, in ascending order
+_MIGRATION_SCRIPTS = {
+    1: "001_initial.sql",
+    2: "002_m1.sql",
+}
 
 
 def _now() -> str:
@@ -35,13 +40,16 @@ def _current_version(conn: sqlite3.Connection) -> int:
 
 
 def migrate(conn: sqlite3.Connection) -> int:
-    """Apply M0 migrations idempotently."""
+    """Apply pending migrations in version order. Each script runs at most
+    once, guarded by the schema_version meta row (the scripts themselves
+    are not idempotent)."""
     current = _current_version(conn)
     if current >= SCHEMA_VERSION:
         return current
-    sql = (_MIGRATIONS / "001_initial.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
-    conn.commit()
+    for version in range(current + 1, SCHEMA_VERSION + 1):
+        script = _MIGRATION_SCRIPTS[version]
+        conn.executescript((_MIGRATIONS / script).read_text(encoding="utf-8"))
+        conn.commit()
     return _current_version(conn)
 
 
@@ -128,6 +136,60 @@ def upsert_photo(
     return cur.lastrowid, "inserted"
 
 
+def has_photo_hashes(
+    conn: sqlite3.Connection,
+    photo_id: int,
+    algorithm_version: str,
+) -> bool:
+    """True only if a complete hash row exists for the CURRENT algorithm
+    version. Rows from an older version (e.g. NULL after an M0 -> M1
+    upgrade, or 'm1-v1' after bumping to 'm1-v2') force recomputation."""
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM photo_hashes
+        WHERE photo_id = ?
+          AND algorithm_version = ?
+          AND phash IS NOT NULL
+          AND dhash IS NOT NULL
+        """,
+        (photo_id, algorithm_version),
+    ).fetchone()
+    return row is not None
+
+
+def upsert_photo_hashes(
+    conn: sqlite3.Connection,
+    photo_id: int,
+    phash: str,
+    dhash: str,
+    algorithm_version: str,
+):
+    conn.execute(
+        """
+        INSERT INTO photo_hashes
+          (photo_id, phash, dhash, algorithm_version, computed_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(photo_id) DO UPDATE SET
+          phash = excluded.phash,
+          dhash = excluded.dhash,
+          algorithm_version = excluded.algorithm_version,
+          computed_at = excluded.computed_at
+        """,
+        (photo_id, phash, dhash, algorithm_version, _now()),
+    )
+
+
+def get_photo_hashes(conn: sqlite3.Connection, photo_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT phash, dhash FROM photo_hashes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"phash": row["phash"], "dhash": row["dhash"]}
+
+
 def add_group(conn: sqlite3.Connection, kind: str, rep_photo_id: int, size: int) -> int:
     cur = conn.execute(
         """
@@ -196,3 +258,17 @@ def clear_exact_results(conn: sqlite3.Connection):
     conn.execute(
         "DELETE FROM decisions WHERE status='DUPLICATE' AND source='algo'"
     )
+
+
+def clear_near_results(conn: sqlite3.Connection):
+    """Clear previous algorithm-generated near groups (M1 candidates only,
+    no decisions are written by the near stage)."""
+    conn.execute(
+        """
+        DELETE FROM group_members
+        WHERE group_id IN (
+          SELECT group_id FROM groups WHERE kind='near'
+        )
+        """
+    )
+    conn.execute("DELETE FROM groups WHERE kind='near'")

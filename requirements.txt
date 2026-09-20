@@ -3,10 +3,11 @@ PyYAML>=6.0
 Pillow>=10.0
 pytest>=8.0
 
+# M1 dependencies
+imagehash>=4.3
+
 # Optional: HEIC support
 # pillow-heif>=0.16
 
-# M1 dependencies (install later)
-# numpy>=1.26
-# imagehash>=4.3
+# Later milestones
 # opencv-python>=4.9
