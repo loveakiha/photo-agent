@@ -5,11 +5,7 @@ import datetime
 import os
 from pathlib import Path
 
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-except ImportError:
-    pass
+import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
 
 
 def _dms_to_float(dms, ref):

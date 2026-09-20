@@ -53,6 +53,93 @@ def migrate(conn: sqlite3.Connection) -> int:
     return _current_version(conn)
 
 
+def _vanished_rows(
+    conn: sqlite3.Connection, rel_path: str, abs_path: str, sha256: str
+) -> list:
+    """Rows for the same sha256 at OTHER paths whose file no longer
+    exists on disk — i.e. the file was moved (or a copied original was
+    deleted). Ordered by photo_id (oldest first)."""
+    rows = conn.execute(
+        "SELECT photo_id, abs_path FROM photos WHERE sha256 = ? AND rel_path <> ? "
+        "ORDER BY photo_id",
+        (sha256, rel_path),
+    ).fetchall()
+    return [
+        row
+        for row in rows
+        if row["abs_path"] != abs_path and not Path(row["abs_path"]).is_file()
+    ]
+
+
+def _purge_rows(conn: sqlite3.Connection, photo_ids: list):
+    """Delete photos rows AND all dependent rows for the given ids.
+
+    Children are removed before parents because ``PRAGMA foreign_keys`` is
+    ON for these connections.
+    """
+    if not photo_ids:
+        return
+    marks = ",".join("?" for _ in photo_ids)
+    for table in (
+        "photo_hashes",
+        "embeddings",
+        "quality",
+        "vlm_analysis",
+        "decisions",
+    ):
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE photo_id IN ({marks})", photo_ids)
+        except sqlite3.OperationalError:
+            continue  # table not present in this schema version
+    # group_members references BOTH groups and photos; groups references
+    # photos. Order: members of the doomed groups -> the groups the purged
+    # photos represent -> the photos rows. (groups/groups_members are
+    # rebuilt by the dedup/near stages on every run, so dropping the whole
+    # group is safe.)
+    try:
+        conn.execute(
+            "DELETE FROM group_members WHERE group_id IN "
+            f"(SELECT group_id FROM groups WHERE rep_photo_id IN ({marks}))",
+            photo_ids,
+        )
+        conn.execute(f"DELETE FROM groups WHERE rep_photo_id IN ({marks})", photo_ids)
+    except sqlite3.OperationalError:
+        pass  # tables not present in this schema version
+    conn.execute(f"DELETE FROM photos WHERE photo_id IN ({marks})", photo_ids)
+    # Any remaining orphan members (members of groups whose OTHER members
+    # survived) are rebuilt by the next dedup/near run — drop them too.
+    try:
+        conn.execute(
+            "DELETE FROM group_members WHERE photo_id NOT IN (SELECT photo_id FROM photos)"
+        )
+        conn.execute(
+            "DELETE FROM groups WHERE rep_photo_id NOT IN (SELECT photo_id FROM photos)"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def prune_missing_files(conn: sqlite3.Connection) -> int:
+    """Delete photo rows whose file no longer exists on disk.
+
+    A file instance that has been moved is reconciled by ``upsert_photo``
+    (its row is updated in place when the new location is scanned). Rows
+    that reach the end of a scan still pointing at a path that does not
+    exist are stale (deleted files, or files removed since the previous
+    scan) and are removed along with their dependent rows. Returns the
+    number of photo rows deleted.
+    """
+    rows = conn.execute("SELECT photo_id, abs_path FROM photos").fetchall()
+    stale_ids = [
+        row["photo_id"] for row in rows if not Path(row["abs_path"]).is_file()
+    ]
+    if not stale_ids:
+        return 0
+    _purge_rows(conn, stale_ids)
+    conn.commit()
+    return len(stale_ids)
+
+
 def upsert_photo(
     conn: sqlite3.Connection,
     *,
@@ -74,22 +161,63 @@ def upsert_photo(
 
     The identity used for M0 idempotency is (rel_path, sha256), not sha256 alone.
     This allows two different paths containing byte-identical files to coexist.
+
+    Move reconciliation: a row at another path is treated as the SAME file
+    having been moved only when that file has actually vanished from disk.
+    - No row at (rel_path, sha256) + vanished row(s) elsewhere: the oldest
+      vanished row is updated in place to the new path (first_seen kept, so
+      the file's history survives a move) and the other vanished rows are
+      purged. Action = "moved".
+    - Row at (rel_path, sha256) + vanished row(s) elsewhere: the current row
+      is updated and the vanished rows are purged (a copy was deleted).
     """
+    meta = (
+        abs_path,
+        size_bytes,
+        width,
+        height,
+        fmt,
+        taken_at,
+        gps_lat,
+        gps_lng,
+        camera_make,
+        camera_model,
+        file_mtime,
+        _now(),
+    )
+    update_sql = """
+        UPDATE photos
+        SET abs_path = ?, size_bytes = ?, width = ?, height = ?, format = ?,
+            taken_at = ?, gps_lat = ?, gps_lng = ?, camera_make = ?,
+            camera_model = ?, file_mtime = ?, last_scanned = ?
+        WHERE photo_id = ?
+    """
+
     row = conn.execute(
         "SELECT photo_id FROM photos WHERE rel_path = ? AND sha256 = ?",
         (rel_path, sha256),
     ).fetchone()
+    stale = _vanished_rows(conn, rel_path, abs_path, sha256)
 
     if row is not None:
+        _purge_rows(conn, [r["photo_id"] for r in stale])
+        conn.execute(update_sql, (*meta, row["photo_id"]))
+        return row["photo_id"], "updated"
+
+    if stale:
+        kept = stale[0]["photo_id"]
+        _purge_rows(conn, [r["photo_id"] for r in stale[1:]])
         conn.execute(
-            """
+            f"""
             UPDATE photos
-            SET abs_path = ?, size_bytes = ?, width = ?, height = ?, format = ?,
-                taken_at = ?, gps_lat = ?, gps_lng = ?, camera_make = ?,
-                camera_model = ?, file_mtime = ?, last_scanned = ?
+            SET rel_path = ?, abs_path = ?, size_bytes = ?, width = ?,
+                height = ?, format = ?, taken_at = ?, gps_lat = ?, gps_lng = ?,
+                camera_make = ?, camera_model = ?, file_mtime = ?,
+                last_scanned = ?
             WHERE photo_id = ?
             """,
             (
+                rel_path,
                 abs_path,
                 size_bytes,
                 width,
@@ -102,10 +230,10 @@ def upsert_photo(
                 camera_model,
                 file_mtime,
                 _now(),
-                row["photo_id"],
+                kept,
             ),
         )
-        return row["photo_id"], "updated"
+        return kept, "moved"
 
     cur = conn.execute(
         """

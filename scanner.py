@@ -6,7 +6,12 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from database import has_photo_hashes, upsert_photo, upsert_photo_hashes
+from database import (
+    prune_missing_files,
+    has_photo_hashes,
+    upsert_photo,
+    upsert_photo_hashes,
+)
 from exif import read_photo_meta
 from hashes import HASH_VERSION, compute_hashes
 from thumbnails import make_thumbnail
@@ -50,6 +55,7 @@ def scan(
     stats: Counter = Counter({
         "inserted": 0,
         "updated": 0,
+        "moved": 0,
         "thumb_ok": 0,
         "thumb_fail": 0,
         "hash_ok": 0,
@@ -120,6 +126,11 @@ def scan(
             conn.commit()
             print(f"  ... 已处理 {total} 张")
 
+    # Files no longer present on disk (deleted, or a moved file whose old
+    # row was never reconciled) are pruned so they can no longer appear as
+    # exact-duplicate members in later runs.
+    pruned = prune_missing_files(conn)
     conn.commit()
     stats["total"] = total
+    stats["pruned"] = pruned
     return dict(stats)

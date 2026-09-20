@@ -99,7 +99,9 @@ def scan(
     print(
         f"扫描完成：{stats.get('total', 0)} 个文件 | "
         f"新增 {stats.get('inserted', 0)} "
-        f"更新 {stats.get('updated', 0)} | "
+        f"更新 {stats.get('updated', 0)} "
+        f"移动合并 {stats.get('moved', 0)} "
+        f"清理失效 {stats.get('pruned', 0)} | "
         f"hash {stats.get('hash_ok', 0)} 算/"
         f"{stats.get('hash_skipped', 0)} 缓存/"
         f"{stats.get('hash_fail', 0)} 失败 | "
@@ -213,7 +215,8 @@ def run_all(
 
     print(
         f"扫描：{stats.get('total', 0)} 文件 "
-        f"（新增 {stats.get('inserted', 0)}，更新 {stats.get('updated', 0)}）"
+        f"（新增 {stats.get('inserted', 0)}，更新 {stats.get('updated', 0)}，"
+        f"移动合并 {stats.get('moved', 0)}，清理失效 {stats.get('pruned', 0)}）"
     )
     print(
         f"精确重复：{result['exact_groups']} 组，"

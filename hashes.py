@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
+
 try:
     from PIL import Image, ImageOps
     import imagehash
@@ -20,12 +22,6 @@ except ImportError:
     imagehash = None
     Image = None
     ImageOps = None
-
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-except ImportError:
-    pass
 
 HASH_VERSION = "m1-v1"
 

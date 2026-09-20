@@ -6,8 +6,8 @@ pytest>=8.0
 # M1 dependencies
 imagehash>=4.3
 
-# Optional: HEIC support
-# pillow-heif>=0.16
+# HEIC/HEIF support (iPhone originals); required when config lists .heic
+pillow-heif>=0.16
 
 # Later milestones
 # opencv-python>=4.9

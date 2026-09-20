@@ -26,7 +26,7 @@ def run_checks(cfg: dict):
         _import_check("PIL", "Pillow", True),
         _import_check("typer", "Typer", True),
         _import_check("pytest", "Pytest", True),
-        _import_check("pillow_heif", "pillow-heif（HEIC）", False),
+        _import_check("pillow_heif", "pillow-heif（HEIC）", True),
         _import_check("numpy", "numpy（M1）", False),
         _import_check("cv2", "OpenCV（M1）", False),
         _import_check("imagehash", "imagehash（M1）", True),
