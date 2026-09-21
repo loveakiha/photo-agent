@@ -266,8 +266,14 @@ def test_photos_without_hashes_are_ignored(tmp_path):
     conn = connect(db)
     try:
         stats = scan(photos, CFG, conn, thumbs)
+        # The good file hashes cleanly; the broken file must not crash the
+        # scan and must produce no hash row. It is now counted as
+        # undecodable (no pixels -> row skipped) rather than hash_fail.
         assert stats["hash_ok"] == 1
-        assert stats["hash_fail"] == 1
+        assert stats["hash_fail"] == 0
+        assert stats["undecodable"] == 1
+        # The broken file must not have a hash row (it was skipped entirely).
+        assert conn.execute("SELECT COUNT(*) FROM photo_hashes").fetchone()[0] == 1
 
         result = build_near_groups(conn)
         assert result["near_groups"] == 0

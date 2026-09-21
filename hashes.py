@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
+import arw  # registers the ARW opener (no-op if rawpy is missing)
 
 try:
     from PIL import Image, ImageOps

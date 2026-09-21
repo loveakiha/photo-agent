@@ -26,6 +26,7 @@ from pathlib import Path
 
 import cv2
 import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
+import arw  # registers the ARW opener (no-op if rawpy is missing)
 import numpy as np
 from PIL import Image, ImageOps
 
