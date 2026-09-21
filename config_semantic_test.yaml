@@ -1,0 +1,38 @@
+# Isolated config for the 语义测试 experiment — own DB, own work/reports dirs.
+input:
+  dir: ""
+  extensions: [jpg, jpeg, heic, png, webp, tiff, bmp, arw]
+  ignore_dirs: [".git", "__MACOSX", "work", "reports"]
+
+thumbnail:
+  size: 256
+
+output:
+  db: work/experiments/semantic_test.db
+  work_dir: work/experiments/semantic_work
+  reports_dir: work/experiments/semantic_reports
+
+quality:
+  long_edge: 2048
+  thresholds:
+    sharpness: { low: 15.0, high: 550.0 }
+    exposure: { low: 0.005, high: 0.05 }
+    noise: { low: 10.0, high: 60.0 }
+
+near:
+  phash: 12
+  dhash: 16
+
+llama:
+  base_url: "http://100.118.117.1:8080"
+  model: "D:\\AIModels\\Qwen3.8-27B\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"
+  max_tokens: 4096
+  http_timeout: 180
+  extra:
+    chat_template_kwargs:
+      enable_thinking: false
+  agent:
+    max_steps: 12
+    max_tool_calls: 20
+    max_seconds: 180
+    max_result_chars: 6000

@@ -25,6 +25,14 @@ from sweep import DEFAULT_PHASH_GRID, DEFAULT_DHASH_GRID, render_summary_md, run
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
 
+# Module-level config override (set by the --config option).
+_cfg_override: Path | None = None
+
+
+def _config_path() -> Path:
+    return _cfg_override or CONFIG_PATH
+
+
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
@@ -32,15 +40,29 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def main_callback(
+    config: Path = typer.Option(
+        None,
+        "--config",
+        help="使用指定配置文件（默认 config.yaml；实验可用独立配置隔离数据库）",
+    ),
+) -> None:
+    global _cfg_override
+    if config is not None:
+        _cfg_override = config
+
+
 def load_cfg() -> dict:
-    if not CONFIG_PATH.exists():
+    path = _config_path()
+    if not path.exists():
         typer.secho(
-            f"缺少配置文件：{CONFIG_PATH}",
+            f"缺少配置文件：{path}",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(1)
-    with open(CONFIG_PATH, encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 

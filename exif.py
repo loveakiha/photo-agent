@@ -33,7 +33,7 @@ def _norm_datetime(value):
 
 
 def read_photo_meta(path: str | Path) -> dict:
-    meta = dict(
+    meta: dict[str, object] = dict(
         width=None,
         height=None,
         fmt=None,
@@ -62,6 +62,18 @@ def read_photo_meta(path: str | Path) -> dict:
         with Image.open(path) as im:
             meta["width"], meta["height"] = im.size
             meta["fmt"] = (im.format or "").upper() or None
+            # ARW: the PIL opener returns the camera's embedded JPEG preview,
+            # whose size is NOT the sensor resolution (e.g. 1616x1080). Store
+            # the true full-frame dimensions so resolution-based comparisons
+            # (policy ranking, reports) are meaningful. The pipeline itself
+            # still works from the preview image; only the stored metadata
+            # changes.
+            if meta["fmt"] == "ARW":
+                from arw import sensor_size
+
+                real = sensor_size(path)
+                if real:
+                    meta["width"], meta["height"] = real
             exif = im.getexif()
             exif_ifd = exif.get_ifd(0x8769)
             taken = exif_ifd.get(36867) or exif.get(306)
