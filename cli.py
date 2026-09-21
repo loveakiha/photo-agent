@@ -18,6 +18,7 @@ from quality import DEFAULT_LONG_EDGE, DEFAULT_THRESHOLDS, QUALITY_VERSION, run_
 from policy import run_policy, user_confirm
 from report import write_report
 from scanner import scan as run_scan
+from semantic import analyze_batch
 from similarity import DEFAULT_PHASH_THRESHOLD, DEFAULT_DHASH_THRESHOLD
 from sweep import DEFAULT_PHASH_GRID, DEFAULT_DHASH_GRID, render_summary_md, run_sweep
 
@@ -287,6 +288,53 @@ def confirm_cmd(
     print(
         f"已确认组 {result['group_id']} [{result['kind']}]："
         f"KEEP photo_id={result['keep']}，其余 {result['others']}"
+    )
+
+
+@app.command()
+def analyze(
+    limit: int = typer.Option(0, "--limit", help="最多分析 N 张（0=全部候选）"),
+    scene: str | None = typer.Option(None, "--scene", help="只分析该场景（风景/人像/静物/食物/建筑/街景/微距/其他）"),
+    min_score: float | None = typer.Option(None, "--min-score", help="只分析 semantic_score 低于该值的照片（用于补分析低分照片）"),
+    refresh: bool = typer.Option(False, "--refresh", help="忽略缓存，强制重新分析"),
+    quiet: bool = typer.Option(False, "--quiet", help="不打印进度"),
+):
+    """M3c：VLM 语义分析（结构化观察 + semantic_score，缓存，串行）。
+
+    例：python cli.py analyze --limit 20
+        python cli.py analyze --scene 风景
+    """
+    cfg = load_cfg()
+    llama = cfg.get("llama") or {}
+    backend = {
+        "base_url": llama.get("base_url"),
+        "model": llama.get("model"),
+        "max_tokens": llama.get("max_tokens"),
+        "http_timeout": llama.get("http_timeout"),
+        "extra": dict(llama.get("extra") or {}),
+    }
+    conn = connect(db_path(cfg))
+    try:
+        def progress(i, total, rel_path, action):
+            if not quiet:
+                print(f"  [{i}/{total}] {rel_path} -> {action}")
+
+        stats = analyze_batch(
+            conn,
+            backend,
+            limit=limit or None,
+            scene=scene,
+            min_score=min_score,
+            refresh=refresh,
+            progress=progress,
+        )
+    finally:
+        conn.close()
+    print(
+        f"语义分析：共 {stats['total']} 张 | "
+        f"新分析 {stats['new']} / 缓存 {stats['cached']} / "
+        f"不可靠 {stats['unreliable']} / 失败 {stats['failed']} "
+        f"| 耗时 {stats['seconds']}s"
     )
 
 
