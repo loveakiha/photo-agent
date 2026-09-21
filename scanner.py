@@ -114,9 +114,16 @@ def scan(
                 )
                 stats["hash_ok"] += 1
 
+        # Thumbnails are keyed by SHA-256, NOT by photo_id: photo_id is an
+        # autoincrement integer that resets whenever the database is
+        # rebuilt (and differs across libraries), so an id-keyed thumbnail
+        # would collide with a stale file left over from a previous scan
+        # and make_thumbnail would wrongly keep it. A content hash is a
+        # stable identity: the same bytes always map to the same thumbnail,
+        # and a changed file gets a fresh one.
         thumb_ok = make_thumbnail(
             path,
-            thumbs_dir / f"{photo_id}.jpg",
+            thumbs_dir / f"{sha}.jpg",
             size,
         )
         stats["thumb_ok" if thumb_ok else "thumb_fail"] += 1

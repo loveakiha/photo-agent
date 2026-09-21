@@ -1,6 +1,6 @@
 project:
   name: photo-agent
-  version: "0.2.0"
+  version: "0.3.0"
 
 input:
   dir: ""
@@ -10,15 +10,31 @@ input:
 thumbnail:
   size: 256
 
+# M1 near 候选阈值（Hamming distance）。
+# 定稿依据：96 张 test_pics 真实库 25 组合 sweep（pHash∈{4,6,8,10,12}×dHash∈{8,10,12,14,16}），
+# 结果只随 pHash 分三档台阶、dHash 几乎不敏感；取最宽档 phash12/dhash16
+# （5 组 13 张 / 13.5% 覆盖）——near 是快、广的第一道粗筛，宁可多抓候选，
+# 精度交给后续人工/VLM。详见 README_M1.md「阈值定稿」。
+near:
+  phash: 12
+  dhash: 16
+
 output:
   db: photo.db
   work_dir: work
   reports_dir: reports
 
+# M3 VLM（规划中，本地部署）。用户本地开发机：RTX 4090D 24G + 7800X3D + 32G，
+# 本地模型跑，token 不限，优化目标是墙钟时间。
 vlm:
-  provider: openai
-  endpoint: ""
-  model: ""
+  provider: local            # local | openai
+  endpoint: ""               # local 时留空；openai 兼容端点
+  model: "qwen2.5-vl"        # ollama 模型名（如 qwen2.5-vl:7b / :14b）
+  # 四级漏斗：SHA256 exact → pHash/dHash near（本段之上）→ 本地 CLIP embedding
+  # 场景聚类（M3a，embeddings 表）→ VLM 只裁决 embedding 灰区候选拼图（M3b，
+  # vlm_sheets/vlm_analysis 表）。VLM 不逐对全量跑。
+  sheet_size: 8              # 每张 contact sheet 的候选图数
+  gray_zone: [0.35, 0.55]    # embedding 相似度灰区，进入 VLM 裁决的区间
 
 logging:
   level: INFO

@@ -8,6 +8,14 @@ it in here.
 from __future__ import annotations
 
 
+# Code-level defaults for the near candidate rule. These are the fallback
+# when ``config.yaml`` has no ``near.phash`` / ``near.dhash`` section and the
+# CLI does not override. The effective default for a run is read from the
+# config (see ``cli.near_thresholds``).
+DEFAULT_PHASH_THRESHOLD = 8
+DEFAULT_DHASH_THRESHOLD = 12
+
+
 def hamming_distance(hash_a: str, hash_b: str) -> int:
     """Number of differing bits between two hex hashes."""
     return (int(hash_a, 16) ^ int(hash_b, 16)).bit_count()

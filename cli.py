@@ -1,18 +1,21 @@
 """photo-agent CLI for M0."""
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import typer
 import yaml
 
-from contact_sheets import build_contact_sheets
+from contact_sheets import build_contact_sheets, build_sheets_for_groups
 from database import connect
 from doctor import run_checks
 from duplicate import build_exact_groups
-from near import build_near_groups
+from near import build_near_groups, threshold_groups
 from report import write_report
 from scanner import scan as run_scan
+from similarity import DEFAULT_PHASH_THRESHOLD, DEFAULT_DHASH_THRESHOLD
+from sweep import DEFAULT_PHASH_GRID, DEFAULT_DHASH_GRID, render_summary_md, run_sweep
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -51,6 +54,52 @@ def thumbs_dir(cfg: dict) -> Path:
 
 def reports_dir(cfg: dict) -> Path:
     return _abs((cfg.get("output") or {}).get("reports_dir", "reports"))
+
+
+def near_thresholds(cfg: dict) -> tuple[int, int]:
+    """Effective (phash, dhash) defaults for this run.
+
+    ``config.yaml``'s ``near.phash`` / ``near.dhash`` win when present;
+    otherwise the code-level defaults apply. CLI ``--phash`` / ``--dhash``
+    override whatever this returns.
+    """
+    near = cfg.get("near") or {}
+    phash = near.get("phash", DEFAULT_PHASH_THRESHOLD)
+    dhash = near.get("dhash", DEFAULT_DHASH_THRESHOLD)
+    return int(phash), int(dhash)
+
+
+def resolve_thresholds(
+    cfg: dict,
+    cli_phash: int | None = None,
+    cli_dhash: int | None = None,
+) -> tuple[int, int]:
+    """Final (phash, dhash) for a run: explicit CLI value > config > code
+    default. ``None`` means "not given on the command line"."""
+    p, d = near_thresholds(cfg)
+    if cli_phash is not None:
+        p = cli_phash
+    if cli_dhash is not None:
+        d = cli_dhash
+    return p, d
+
+
+def _parse_combo(spec: str) -> tuple[int, int] | None:
+    """Parse ``phash8_dhash12`` -> (8, 12); None if malformed.
+
+    The format is ``phash<N1>_dhash<N2>``: the numbers trail the ``phash``
+    and ``dhash`` keywords, so split on the literal ``_dhash`` join.
+    """
+    spec = spec.strip().lower()
+    if not spec.startswith("phash"):
+        return None
+    rest = spec[len("phash"):]
+    if "_dhash" not in rest:
+        return None
+    phash_part, dhash_part = rest.split("_dhash", 1)
+    if not (phash_part.isdigit() and dhash_part.isdigit()):
+        return None
+    return int(phash_part), int(dhash_part)
 
 
 def _require_dir(directory: Path) -> Path:
@@ -111,11 +160,14 @@ def scan(
 
 @app.command()
 def near(
-    phash_threshold: int = typer.Option(8, "--phash", help="pHash 汉明距离阈值"),
-    dhash_threshold: int = typer.Option(12, "--dhash", help="dHash 汉明距离阈值"),
+    phash_threshold: int | None = typer.Option(None, "--phash", help="pHash 汉明距离阈值（默认取 config.yaml near.phash）"),
+    dhash_threshold: int | None = typer.Option(None, "--dhash", help="dHash 汉明距离阈值（默认取 config.yaml near.dhash）"),
 ):
     """Stage 2（M1）：pHash/dHash 近似重复分组（只建候选组，不标记）。"""
     cfg = load_cfg()
+    phash_threshold, dhash_threshold = resolve_thresholds(
+        cfg, phash_threshold, dhash_threshold
+    )
     conn = connect(db_path(cfg))
     try:
         result = build_near_groups(
@@ -178,15 +230,86 @@ def contact(
     print(f"已生成 {len(sheets)} 张拼图：{reports_dir(cfg) / 'contact'}")
 
 
+@app.command()
+def sweep(
+    sheets: str = typer.Option(
+        None,
+        "--sheets",
+        help="按需生成 contact sheet：逗号分隔的组合，如 phash8_dhash12,phash10_dhash14（只生成 size>=2 的组）",
+    ),
+):
+    """M1 阈值扫参：只读实验，扫描 pHash x dHash 网格，输出 summary.md（不写数据库）。"""
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        out = run_sweep(conn)
+    finally:
+        conn.close()
+
+    out_dir = reports_dir(cfg) / "sweep" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "summary.md"
+    summary_path.write_text(
+        render_summary_md(
+            out["photos"], out["results"], DEFAULT_PHASH_GRID, DEFAULT_DHASH_GRID
+        ),
+        encoding="utf-8",
+    )
+    print(f"扫参完成：{out['photos']} 张，{len(out['results'])} 组组合（只读，未写库）")
+    print(f"summary：{summary_path}")
+    print("从 summary 挑 2-3 个组合后，用 --sheets <combo>[,<combo>...] 生成拼图。")
+
+    if sheets:
+        _render_sweep_sheets(cfg, sheets)
+
+
+def _render_sweep_sheets(cfg: dict, sheets: str) -> None:
+    """Render contact sheets for one or more candidate combos (read-only).
+
+    ``sheets`` is a comma-separated list of ``phashX_dhashY`` specs. Each
+    combo's groups (size >= 2 only) are rendered to
+    ``reports/sweep/<combo>/`` without touching the database.
+    """
+    for spec in sheets.split(","):
+        combo = _parse_combo(spec)
+        if combo is None:
+            typer.secho(
+                f"忽略无法解析的组合：{spec.strip()}（应为 phashX_dhashY 形式）",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            continue
+        phash, dhash = combo
+        conn = connect(db_path(cfg))
+        try:
+            groups = threshold_groups(conn, phash, dhash)
+        finally:
+            conn.close()
+        if not groups:
+            print(f"{spec}：没有 size>=2 的组，跳过拼图。")
+            continue
+        combo_dir = reports_dir(cfg) / "sweep" / f"phash{phash}_dhash{dhash}"
+        written = build_sheets_for_groups(
+            groups,
+            thumbs_dir(cfg),
+            combo_dir,
+            name_prefix=f"phash{phash}_dhash{dhash}",
+        )
+        print(f"{spec}：{len(written)} 张拼图 -> {combo_dir}")
+
+
 @app.command(name="all")
 def run_all(
     dir: Path = typer.Option(..., "--dir", help="照片根目录"),
     limit: int = typer.Option(0, "--limit", help="只处理前 N 个文件（0=全部）"),
-    phash_threshold: int = typer.Option(8, "--phash", help="pHash 汉明距离阈值"),
-    dhash_threshold: int = typer.Option(12, "--dhash", help="dHash 汉明距离阈值"),
+    phash_threshold: int | None = typer.Option(None, "--phash", help="pHash 汉明距离阈值（默认取 config.yaml near.phash）"),
+    dhash_threshold: int | None = typer.Option(None, "--dhash", help="dHash 汉明距离阈值（默认取 config.yaml near.dhash）"),
 ):
     """scan + dedup + near + report 一条龙。"""
     cfg = load_cfg()
+    phash_threshold, dhash_threshold = resolve_thresholds(
+        cfg, phash_threshold, dhash_threshold
+    )
     directory = _require_dir(dir)
     conn = connect(db_path(cfg))
     try:

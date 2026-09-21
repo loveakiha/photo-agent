@@ -27,11 +27,22 @@ M0 的幂等键是 `(rel_path, sha256)`。
 
 注意：M0 暂不建立“文件被移动后仍识别为同一实体”的复杂身份追踪机制；同一路径内容发生变化时会形成新的记录，旧记录暂时保留，后续可在扫描状态/历史机制中处理。
 
+## 移动文件调和与清理（M0 补丁）
+
+- **移动调和**：`upsert_photo` 检测到同一 `sha256` 的文件出现在新路径、而旧路径已不存在
+  （即文件被移动，或副本被删）时，**原地更新既有行**的 `rel_path`/`abs_path`，而不是插入新行——
+  避免把一次移动误判成“精确重复”。
+- **扫描末清理**：`prune_missing_files` 删除文件已不存在的 `photos` 行（stale 行），
+  按 FK 安全顺序级联清理其 `photo_hashes`/`quality`/`embeddings`/`vlm_analysis`/
+  `decisions` 及所属 `groups`/`group_members`；扫描报告打印 `moved` 与 `pruned` 计数。
+- **HEIC**：`heif.py` 一次性注册 HEIF opener，exif/thumbnails/hashes 导入它，
+  HEIC 解码与导入顺序无关；`pillow-heif` 为必需依赖。
+
 ## M1 说明（pHash/dHash 近似重复）
 
 M1 在 M0 之上增加：
 - `photo_hashes` 表：每张照片的 pHash 与 dHash（64-bit hex），记录 `algorithm_version` 与 `computed_at`
-- `near.py`：pHash 距离 ≤ 8 **且** dHash 距离 ≤ 12 的照片对视为候选（阈值是工程参数，非数学常数）
+- `near.py`：pHash 距离 ≤ 12 **且** dHash 距离 ≤ 16 的照片对视为候选（阈值是工程参数，非数学常数，定稿见 README_M1「阈值定稿」）
 - 候选对经 union-find 聚成**连通分量候选组**，写入 `groups(kind='near')` + `group_members`
 - 只产出候选，不写 `decisions`——算法结果与用户决策严格分开
 
@@ -48,13 +59,10 @@ M1 在 M0 之上增加：
    且文件必须仍存在于磁盘；M0 保留的历史行与已删除文件的行不参与
    NEAR，避免产生“幽灵组”。
 
-### 规模边界（M1.0 冻结范围）
+### 规模边界
 
-M1.0 的候选配对是 **O(N²)** 暴力两两比较（N=10k 约 5000 万次比较，
-N=100k 约 50 亿次）。因此：
-
-- M1.0 用于**小规模/中等规模**验证阈值与分组逻辑（1k~10k 量级可接受）
-- **不要**用 M1.0 直接扫几万~十几万张的真实大库
-- M1.1 再根据真实数据决定候选搜索算法（LSH / 桶化 / ANN 等），
-  并先用真实照片库做阈值实验（`cli.py near --phash/--dhash` 扫参），
-  人工抽样后确定 M1 默认阈值
+M1.1 v1（当前）保留 O(N²) 两两比较，但 hash 预解析为 64-bit int 一次、
+pHash XOR 超阈值即 early-exit（跳过 dHash）。N=10k 约 3min、N=100k 约 15min，
+可在真实大库上直接扫参（`cli.py sweep` 只读扫参）。
+真实库基准仍慢时下一步 numpy 向量化，多探针 LSH 备选；
+高 32 位分桶永久排除（会静默漏掉约 1/3 阈值边界候选对，违背召回优先）。

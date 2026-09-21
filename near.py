@@ -24,12 +24,20 @@ Semantics (important):
 M1.0 writes candidates only — no ``decisions`` rows, no user-facing
 verdict.
 
-Scale boundary (M1.0): candidate pairing is O(N^2) pairwise comparison —
-roughly N*(N-1)/2 comparisons (~50M at 10k photos, ~5B at 100k). This is
-deliberate: M1.0 is meant to validate the hashes, thresholds, and
-grouping logic on small/medium libraries. Do NOT scan a huge real
-library with M1.0; a candidate-search index (LSH / bucketing / ANN) is
-M1.1 work and must be benchmarked on real data before choosing.
+Scale & M1.1 v1:
+Candidate pairing is still O(N^2) pairwise, but each hash is parsed from
+hex to a 64-bit int ONCE (not per comparison), and the pHash distance is
+checked first as an early-exit so the dHash distance is only computed when
+the pHash distance already qualifies. This is bit-exactly equivalent to
+the M1.0 per-comparison hex parsing: the candidate pairs, the pair count,
+and the connected components are identical (see
+``tests/test_near_equivalence.py``). No new dependency; tens of thousands
+of photos finish in a few minutes, which is acceptable for an occasional
+batch job. The upgrade path, if a real library is still too slow, is numpy
+vectorization (numpy is already a transitive dependency). Approximate
+bucketing / LSH is deliberately NOT introduced now, because exact
+bucketing can silently drop boundary candidates — that would violate the
+recall-first rule (宁可多抓候选，不要静默漏掉候选).
 """
 from __future__ import annotations
 
@@ -38,7 +46,7 @@ from pathlib import Path
 
 from database import add_group, add_group_member, clear_near_results
 from hashes import HASH_VERSION
-from similarity import hamming_distance, is_near_candidate
+from similarity import hamming_distance
 
 # 64-bit hashes: max possible Hamming distance
 _BIT_COUNT = 64
@@ -49,26 +57,15 @@ def _canonical_key(row):
     return (depth, row["rel_path"], row["first_seen"] or "")
 
 
-def build_near_groups(
-    conn,
-    phash_threshold: int = 8,
-    dhash_threshold: int = 12,
-    algorithm_version: str | None = None,
-) -> dict:
-    """Build near-candidate groups. Idempotent per run: existing 'near'
-    groups are cleared first.
+def _fetch_rows(conn, algorithm_version):
+    """Every photo eligible for near grouping, fully filtered and sorted.
 
-    Only rows meeting ALL of the following participate:
-    - hash rows written by ``algorithm_version`` (default: current
-      ``hashes.HASH_VERSION``), complete (both hashes non-NULL);
-    - the latest photos record for each abs_path that still exists on
-      disk (stale M0 history is ignored);
-    - one canonical row per SHA-256 (exact copies are exact-stage only).
+    Returns a list of row dicts (photo_id, rel_path, abs_path, sha256,
+    first_seen, phash, dhash) that have: a hash row under
+    ``algorithm_version`` (both hashes present), are the latest record per
+    abs_path, still exist on disk, and are collapsed to one row per
+    SHA-256. Sorted by photo_id.
     """
-    if algorithm_version is None:
-        algorithm_version = HASH_VERSION
-
-    clear_near_results(conn)
     rows = conn.execute(
         """
         SELECT p.photo_id, p.rel_path, p.abs_path, p.sha256, p.first_seen,
@@ -98,33 +95,78 @@ def build_near_groups(
             by_sha[row["sha256"]] = row
     rows = list(by_sha.values())
     rows.sort(key=lambda r: r["photo_id"])
+    return rows
 
+
+def _pair_clusters(rows, phash_ints, dhash_ints, phash_threshold, dhash_threshold):
+    """Pure union-find over pre-parsed 64-bit int hashes.
+
+    ``rows`` and the two int lists are index-aligned. Returns
+    ``(n_pairs, clusters)`` where ``clusters`` maps a representative
+    photo_id to its member rows. Bit-exactly equivalent to the M1.0
+    per-pair ``similarity.is_near_candidate`` check: pHash is evaluated
+    first as an early-exit, then dHash. Performs no DB access.
+    """
     parent = {row["photo_id"]: row["photo_id"] for row in rows}
 
-    def find(x: int) -> int:
+    def find(x):
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
+    n = len(rows)
     n_pairs = 0
-    for i in range(len(rows)):
-        a = rows[i]
-        for j in range(i + 1, len(rows)):
-            b = rows[j]
-            if is_near_candidate(
-                a["phash"], b["phash"], a["dhash"], b["dhash"],
-                phash_threshold, dhash_threshold,
-            ):
-                n_pairs += 1
-                root_a, root_b = find(a["photo_id"]), find(b["photo_id"])
-                if root_a != root_b:
-                    parent[root_b] = root_a
+    for i in range(n):
+        pi = phash_ints[i]
+        di = dhash_ints[i]
+        for j in range(i + 1, n):
+            # Early-exit: pHash too far -> the pair cannot be a candidate,
+            # so skip the dHash distance entirely.
+            if (pi ^ phash_ints[j]).bit_count() > phash_threshold:
+                continue
+            if (di ^ dhash_ints[j]).bit_count() > dhash_threshold:
+                continue
+            n_pairs += 1
+            root_a = find(rows[i]["photo_id"])
+            root_b = find(rows[j]["photo_id"])
+            if root_a != root_b:
+                parent[root_b] = root_a
 
-    clusters: dict[int, list] = defaultdict(list)
+    clusters = defaultdict(list)
     for row in rows:
         clusters[find(row["photo_id"])].append(row)
+    return n_pairs, clusters
 
+
+def build_near_groups(
+    conn,
+    phash_threshold: int = 8,
+    dhash_threshold: int = 12,
+    algorithm_version: str | None = None,
+) -> dict:
+    """Build near-candidate groups. Idempotent per run: existing 'near'
+    groups are cleared first.
+
+    Only rows meeting ALL of the following participate:
+    - hash rows written by ``algorithm_version`` (default: current
+      ``hashes.HASH_VERSION``), complete (both hashes non-NULL);
+    - the latest photos record for each abs_path that still exists on
+      disk (stale M0 history is ignored);
+    - one canonical row per SHA-256 (exact copies are exact-stage only).
+    """
+    if algorithm_version is None:
+        algorithm_version = HASH_VERSION
+
+    rows = _fetch_rows(conn, algorithm_version)
+    phash_ints = [int(row["phash"], 16) for row in rows]
+    dhash_ints = [int(row["dhash"], 16) for row in rows]
+
+    n_pairs, clusters = _pair_clusters(
+        rows, phash_ints, dhash_ints, phash_threshold, dhash_threshold
+    )
+
+    clear_near_results(conn)
     n_groups = 0
     n_members = 0
     for members in clusters.values():
@@ -146,9 +188,8 @@ def build_near_groups(
                 # Distance to the representative (not a fused similarity):
                 # these are the exact numbers the candidate rule is built
                 # on, so the report shows the evidence, not a fake score.
-                sim_to_rep=1.0 - hamming_distance(
-                    rep["phash"], member["phash"]
-                ) / _BIT_COUNT,
+                sim_to_rep=1.0
+                - hamming_distance(rep["phash"], member["phash"]) / _BIT_COUNT,
             )
         n_groups += 1
         n_members += len(members) - 1
@@ -161,3 +202,35 @@ def build_near_groups(
         "phash_threshold": phash_threshold,
         "dhash_threshold": dhash_threshold,
     }
+
+
+def threshold_groups(
+    conn,
+    phash_threshold: int,
+    dhash_threshold: int,
+    algorithm_version: str | None = None,
+) -> list[list]:
+    """Read-only: the in-memory near groups (member rows, size>=2) for a
+    single threshold pair, without writing to the database. Used by
+    ``cli sweep --sheets`` to render contact sheets from a candidate
+    combination while leaving the DB's official groups untouched.
+
+    Each group is a list of member row dicts sorted by rel_path; the list
+    of groups is ordered by the first member's rel_path so output is
+    deterministic.
+    """
+    if algorithm_version is None:
+        algorithm_version = HASH_VERSION
+    rows = _fetch_rows(conn, algorithm_version)
+    phash_ints = [int(row["phash"], 16) for row in rows]
+    dhash_ints = [int(row["dhash"], 16) for row in rows]
+    _, clusters = _pair_clusters(
+        rows, phash_ints, dhash_ints, phash_threshold, dhash_threshold
+    )
+    groups = []
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        groups.append(sorted(members, key=lambda r: r["rel_path"]))
+    groups.sort(key=lambda m: m[0]["rel_path"])
+    return groups
