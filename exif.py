@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
+import arw  # registers the ARW opener (no-op if rawpy is missing)
 
 
 def _dms_to_float(dms, ref):

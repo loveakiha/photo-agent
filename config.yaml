@@ -4,7 +4,7 @@ project:
 
 input:
   dir: ""
-  extensions: [jpg, jpeg, heic, png, webp, tiff, bmp]
+  extensions: [jpg, jpeg, heic, png, webp, tiff, bmp, arw]
   ignore_dirs: [".git", "__MACOSX", "work", "reports"]
 
 thumbnail:

@@ -9,6 +9,10 @@ imagehash>=4.3
 # HEIC/HEIF support (iPhone originals); required when config lists .heic
 pillow-heif>=0.16
 
+# ARW (Sony Alpha RAW) support; required when config lists .arw
+# Windows wheels available from PyPI. arw.py is a no-op if this is missing.
+rawpy>=0.21
+
 # M2 dependencies (technical quality measurement, CPU-only)
 opencv-python>=4.9
 numpy>=1.26

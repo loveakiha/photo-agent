@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
+import arw  # registers the ARW opener (no-op if rawpy is missing)
 
 
 def make_thumbnail(src: str | Path, dst: str | Path, size: int = 256) -> bool:
