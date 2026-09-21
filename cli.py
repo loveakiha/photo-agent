@@ -19,6 +19,12 @@ from policy import run_policy, user_confirm
 from report import write_report
 from scanner import scan as run_scan
 from semantic import analyze_batch
+from taste import (
+    PROFILE_VERSION,
+    build_taste_profile,
+    profile_summary,
+    rank_top_n,
+)
 from similarity import DEFAULT_PHASH_THRESHOLD, DEFAULT_DHASH_THRESHOLD
 from sweep import DEFAULT_PHASH_GRID, DEFAULT_DHASH_GRID, render_summary_md, run_sweep
 
@@ -358,6 +364,55 @@ def analyze(
         f"不可靠 {stats['unreliable']} / 失败 {stats['failed']} "
         f"| 耗时 {stats['seconds']}s"
     )
+
+
+@app.command()
+def taste(
+    show_json: bool = typer.Option(False, "--json", help="输出 JSON（供后续阶段消费）"),
+):
+    """M3.1：Taste Profile — 从用户的 confirm/preference 决定聚合口味画像。
+
+    零 VLM、零文件访问。先做几组 confirm 命令后这里才有内容。
+    """
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        profile = build_taste_profile(conn)
+    finally:
+        conn.close()
+    if show_json:
+        print(json.dumps(profile, ensure_ascii=False, indent=2))
+    else:
+        print(profile_summary(profile))
+
+
+@app.command()
+def rank(
+    scene: str = typer.Argument(..., help="场景（风景/人像/食物/建筑/静物/其他）"),
+    n: int = typer.Option(5, "--n", help="返回前 N 名（默认 5）"),
+    no_taste: bool = typer.Option(False, "--no-taste", help="不用口味画像（纯 semantic_score）"),
+):
+    """M3.1：口味感知排名 — semantic_score + taste_bias，近重复去组。
+
+    例：python cli.py rank 风景 --n 5
+    """
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        profile = None if no_taste else build_taste_profile(conn)
+        rows = rank_top_n(conn, scene, n=n, profile=profile)
+    finally:
+        conn.close()
+    if not rows:
+        print(f"场景「{scene}」无候选")
+        return
+    print(f"{scene} 口味感知 TOP{n}（{'无画像' if no_taste else '含口味偏置'}）：")
+    for i, r in enumerate(rows, 1):
+        bias = f"{r['bias']:+.2f}"
+        print(
+            f"{i}. {r['rel_path']}  语义 {r['semantic_score']:.0f} "
+            f"+ 偏置 {bias} = {r['final_score']:.1f}"
+        )
 
 
 @app.command()
