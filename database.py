@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 # version -> migration script; applied once per version, in ascending order
 _MIGRATION_SCRIPTS = {
@@ -13,6 +13,7 @@ _MIGRATION_SCRIPTS = {
     2: "002_m1.sql",
     3: "003_m2.sql",
     4: "004_preference_tables.sql",
+    5: "005_semantic.sql",
 }
 
 
@@ -87,6 +88,7 @@ def _purge_rows(conn: sqlite3.Connection, photo_ids: list):
         "embeddings",
         "quality",
         "vlm_analysis",
+        "semantic_analysis",
         "decisions",
     ):
         try:

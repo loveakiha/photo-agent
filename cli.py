@@ -15,13 +15,29 @@ from doctor import run_checks
 from duplicate import build_exact_groups
 from near import build_near_groups, threshold_groups
 from quality import DEFAULT_LONG_EDGE, DEFAULT_THRESHOLDS, QUALITY_VERSION, run_quality
+from policy import run_policy, user_confirm
 from report import write_report
 from scanner import scan as run_scan
+from semantic import analyze_batch
+from taste import (
+    PROFILE_VERSION,
+    build_taste_profile,
+    profile_summary,
+    rank_top_n,
+)
 from similarity import DEFAULT_PHASH_THRESHOLD, DEFAULT_DHASH_THRESHOLD
 from sweep import DEFAULT_PHASH_GRID, DEFAULT_DHASH_GRID, render_summary_md, run_sweep
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
+
+# Module-level config override (set by the --config option).
+_cfg_override: Path | None = None
+
+
+def _config_path() -> Path:
+    return _cfg_override or CONFIG_PATH
+
 
 app = typer.Typer(
     add_completion=False,
@@ -30,15 +46,29 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def main_callback(
+    config: Path = typer.Option(
+        None,
+        "--config",
+        help="使用指定配置文件（默认 config.yaml；实验可用独立配置隔离数据库）",
+    ),
+) -> None:
+    global _cfg_override
+    if config is not None:
+        _cfg_override = config
+
+
 def load_cfg() -> dict:
-    if not CONFIG_PATH.exists():
+    path = _config_path()
+    if not path.exists():
         typer.secho(
-            f"缺少配置文件：{CONFIG_PATH}",
+            f"缺少配置文件：{path}",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(1)
-    with open(CONFIG_PATH, encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
@@ -230,6 +260,159 @@ def dedup():
         f"精确重复：{result['exact_groups']} 组，"
         f"{result['duplicates']} 个文件标记 DUPLICATE（原图未动）"
     )
+
+
+@app.command()
+def decide(
+    kinds: str = typer.Option("exact,near", "--kinds", help="参与决策的组类型（逗号分隔：exact,near）"),
+):
+    """M3b：Decision Policy（只写 decisions 建议行，绝不删文件/改照片/改分组）。
+
+    输入=已入库的客观事实（质量/分辨率/元数据/分组），输出=代表照片建议+
+    每个候选的 reason/evidence。用户确认后用 confirm 命令落最终决定。
+    """
+    kind_list = tuple(k.strip() for k in kinds.split(",") if k.strip())
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        result = run_policy(conn, kinds=kind_list)
+    finally:
+        conn.close()
+    s = result["stats"]
+    print(
+        f"Decision Policy (m3b-v1)：{s['groups']} 组参与决策 | "
+        f"KEEP 建议 {s['keep']} / DISCARD 建议 {s['discard']} | "
+        f"用户已决定(跳过) {s['user_ignored']}"
+    )
+    for row in result["summary"][:20]:
+        print(
+            f"  组 {row['group_id']} [{row['kind']}] "
+            f"代表: {row['representative']} ({row['members']} 成员)"
+        )
+    if len(result["summary"]) > 20:
+        print(f"  … 其余 {len(result['summary']) - 20} 组见 report/decisions 表")
+
+
+@app.command(name="confirm")
+def confirm_cmd(
+    group_id: int = typer.Option(..., "--group", help="组 id（见 decide 输出或 report）"),
+    keep: int = typer.Option(..., "--keep", help="用户选定保留的 photo_id"),
+    ignore: bool = typer.Option(
+        False, "--ignore", help="其余成员保持未决定（默认 DISCARD）"
+    ),
+):
+    """M3b：用户确认某组的最终决定（写 source='user' 行，policy 永不再覆盖）。"""
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        result = user_confirm(
+            conn, group_id, keep, others=("IGNORE",) if ignore else ("DISCARD",)
+        )
+    except ValueError as exc:
+        typer.secho(f"确认失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    finally:
+        conn.close()
+    print(
+        f"已确认组 {result['group_id']} [{result['kind']}]："
+        f"KEEP photo_id={result['keep']}，其余 {result['others']}"
+    )
+
+
+@app.command()
+def analyze(
+    limit: int = typer.Option(0, "--limit", help="最多分析 N 张（0=全部候选）"),
+    scene: str | None = typer.Option(None, "--scene", help="只分析该场景（风景/人像/静物/食物/建筑/街景/微距/其他）"),
+    min_score: float | None = typer.Option(None, "--min-score", help="只分析 semantic_score 低于该值的照片（用于补分析低分照片）"),
+    refresh: bool = typer.Option(False, "--refresh", help="忽略缓存，强制重新分析"),
+    quiet: bool = typer.Option(False, "--quiet", help="不打印进度"),
+):
+    """M3c：VLM 语义分析（结构化观察 + semantic_score，缓存，串行）。
+
+    例：python cli.py analyze --limit 20
+        python cli.py analyze --scene 风景
+    """
+    cfg = load_cfg()
+    llama = cfg.get("llama") or {}
+    backend = {
+        "base_url": llama.get("base_url"),
+        "model": llama.get("model"),
+        "max_tokens": llama.get("max_tokens"),
+        "http_timeout": llama.get("http_timeout"),
+        "extra": dict(llama.get("extra") or {}),
+    }
+    conn = connect(db_path(cfg))
+    try:
+        def progress(i, total, rel_path, action):
+            if not quiet:
+                print(f"  [{i}/{total}] {rel_path} -> {action}")
+
+        stats = analyze_batch(
+            conn,
+            backend,
+            limit=limit or None,
+            scene=scene,
+            min_score=min_score,
+            refresh=refresh,
+            progress=progress,
+        )
+    finally:
+        conn.close()
+    print(
+        f"语义分析：共 {stats['total']} 张 | "
+        f"新分析 {stats['new']} / 缓存 {stats['cached']} / "
+        f"不可靠 {stats['unreliable']} / 失败 {stats['failed']} "
+        f"| 耗时 {stats['seconds']}s"
+    )
+
+
+@app.command()
+def taste(
+    show_json: bool = typer.Option(False, "--json", help="输出 JSON（供后续阶段消费）"),
+):
+    """M3.1：Taste Profile — 从用户的 confirm/preference 决定聚合口味画像。
+
+    零 VLM、零文件访问。先做几组 confirm 命令后这里才有内容。
+    """
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        profile = build_taste_profile(conn)
+    finally:
+        conn.close()
+    if show_json:
+        print(json.dumps(profile, ensure_ascii=False, indent=2))
+    else:
+        print(profile_summary(profile))
+
+
+@app.command()
+def rank(
+    scene: str = typer.Argument(..., help="场景（风景/人像/食物/建筑/静物/其他）"),
+    n: int = typer.Option(5, "--n", help="返回前 N 名（默认 5）"),
+    no_taste: bool = typer.Option(False, "--no-taste", help="不用口味画像（纯 semantic_score）"),
+):
+    """M3.1：口味感知排名 — semantic_score + taste_bias，近重复去组。
+
+    例：python cli.py rank 风景 --n 5
+    """
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        profile = None if no_taste else build_taste_profile(conn)
+        rows = rank_top_n(conn, scene, n=n, profile=profile)
+    finally:
+        conn.close()
+    if not rows:
+        print(f"场景「{scene}」无候选")
+        return
+    print(f"{scene} 口味感知 TOP{n}（{'无画像' if no_taste else '含口味偏置'}）：")
+    for i, r in enumerate(rows, 1):
+        bias = f"{r['bias']:+.2f}"
+        print(
+            f"{i}. {r['rel_path']}  语义 {r['semantic_score']:.0f} "
+            f"+ 偏置 {bias} = {r['final_score']:.1f}"
+        )
 
 
 @app.command()

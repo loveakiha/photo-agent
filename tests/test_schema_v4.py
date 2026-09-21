@@ -19,9 +19,9 @@ def v4_db(tmp_path):
 
 
 def test_migrates_to_v4(v4_db):
-    assert database.SCHEMA_VERSION == 4
+    assert database.SCHEMA_VERSION >= 4
     version = database._current_version(v4_db)
-    assert version == 4
+    assert version == database.SCHEMA_VERSION
 
 
 def test_tables_exist(v4_db):

@@ -7,3 +7,4 @@ photo.db-shm
 work/
 reports/
 .pytest_cache/
+semantic_full.log
