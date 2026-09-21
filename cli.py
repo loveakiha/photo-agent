@@ -4,9 +4,11 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import json
 import typer
 import yaml
 
+from agent import AgentError, run_task, summarize
 from contact_sheets import build_contact_sheets, build_sheets_for_groups
 from database import connect
 from doctor import run_checks
@@ -327,6 +329,125 @@ def _render_sweep_sheets(cfg: dict, sheets: str) -> None:
             name_prefix=f"phash{phash}_dhash{dhash}",
         )
         print(f"{spec}：{len(written)} 张拼图 -> {combo_dir}")
+
+
+@app.command()
+def ask(
+    message: str = typer.Argument(..., help="自然语言问题/任务"),
+    quiet: bool = typer.Option(False, "--quiet", help="不打印工具调用过程日志"),
+):
+    """M3：用自然语言查询照片库（只读工具，不改动任何文件）。
+
+    例：python cli.py ask "找出 2025 年拍的海边照片"
+        python cli.py ask "哪些照片质量最差？"
+    """
+    _run_agent(cfg_ask(), message, quiet, single_shot=True)
+
+
+@app.command(name="agent")
+def agent_cmd(
+    quiet: bool = typer.Option(False, "--quiet", help="不打印工具调用过程日志"),
+):
+    """M3：交互式多轮会话（带上下文记忆，Ctrl+D 或 exit 退出）。"""
+    _run_agent(cfg_ask(), None, quiet)
+
+
+def cfg_ask() -> dict:
+    cfg = load_cfg()
+    llama = cfg.get("llama") or {}
+    guard = llama.get("agent") or {}
+    return {
+        "backend": {
+            "base_url": llama.get("base_url"),
+            "model": llama.get("model"),
+            "max_tokens": llama.get("max_tokens"),
+            "http_timeout": llama.get("http_timeout"),
+            "extra": dict(llama.get("extra") or {}),
+            "reports_dir": str(reports_dir(cfg)),
+        },
+        "db": db_path(cfg),
+        "max_steps": int(guard.get("max_steps", 12)),
+        "max_tool_calls": int(guard.get("max_tool_calls", 20)),
+        "max_seconds": float(guard.get("max_seconds", 180)),
+        "max_result_chars": int(guard.get("max_result_chars", 6000)),
+    }
+
+
+def _on_event(event: dict, quiet: bool) -> None:
+    if quiet:
+        return
+    if event["type"] == "tool_call":
+        args = json.dumps(event["args"], ensure_ascii=False)
+        if len(args) > 120:
+            args = args[:120] + "…"
+        dup = "（重复，短路）" if event.get("duplicate") else ""
+        print(f"  ⚙ {event['name']}({args}){dup}", flush=True)
+
+
+def _run_agent(
+    settings: dict, first_message: str | None, quiet: bool, single_shot: bool = False
+) -> None:
+    """Drive the agent loop. ``single_shot`` answers one message and exits
+    (used by ``ask``); otherwise it reads follow-up lines until EOF/exit
+    (used by ``agent``)."""
+    try:
+        conn = connect(settings["db"])
+    except Exception as exc:
+        typer.secho(f"数据库打开失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    history: list[dict] = []
+    try:
+        while True:
+            if first_message is not None:
+                message = first_message
+                first_message = None
+            else:
+                if single_shot:
+                    break
+                try:
+                    message = input("你> ").strip()
+                except EOFError:
+                    print()
+                    break
+                if message.lower() in ("exit", "quit", "q"):
+                    break
+                if not message:
+                    continue
+            print()
+            try:
+                result = run_task(
+                    conn,
+                    settings["backend"],
+                    message,
+                    history=history,
+                    on_event=lambda e: _on_event(e, quiet),
+                    max_steps=settings["max_steps"],
+                    max_tool_calls=settings["max_tool_calls"],
+                    max_seconds=settings["max_seconds"],
+                    max_result_chars=settings["max_result_chars"],
+                )
+            except AgentError as exc:
+                typer.secho(f"Agent 失败：{exc}", fg=typer.colors.RED)
+                typer.secho(
+                    "（检查 llama-server 是否在运行，以及 config.yaml 的 llama 段）",
+                    fg=typer.colors.YELLOW,
+                )
+                return
+            print(result.final_text.strip())
+            print()
+            print(summarize(result))
+            for note in result.notes:
+                typer.secho(f"  ⚠ {note}", fg=typer.colors.YELLOW)
+            # session history: user + final assistant answer only (Q18)
+            history.append({"role": "user", "content": message})
+            history.append(
+                {"role": "assistant", "content": result.final_text or "(无回复)"}
+            )
+            if len(history) > 12:  # keep recent 6 turns max
+                history = history[-12:]
+    finally:
+        conn.close()
 
 
 @app.command(name="all")

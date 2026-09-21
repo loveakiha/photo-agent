@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 photo.db
+photo.db-wal
+photo.db-shm
 work/
 reports/
 .pytest_cache/

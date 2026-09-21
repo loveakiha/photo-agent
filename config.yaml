@@ -1,6 +1,6 @@
 project:
   name: photo-agent
-  version: "0.3.0"
+  version: "0.4.0"
 
 input:
   dir: ""
@@ -41,17 +41,26 @@ output:
   work_dir: work
   reports_dir: reports
 
-# M3 VLM（规划中，本地部署）。用户本地开发机：RTX 4090D 24G + 7800X3D + 32G，
-# 本地模型跑，token 不限，优化目标是墙钟时间。
-vlm:
-  provider: local            # local | openai
-  endpoint: ""               # local 时留空；openai 兼容端点
-  model: "qwen2.5-vl"        # ollama 模型名（如 qwen2.5-vl:7b / :14b）
-  # 四级漏斗：SHA256 exact → pHash/dHash near（本段之上）→ 本地 CLIP embedding
-  # 场景聚类（M3a，embeddings 表）→ VLM 只裁决 embedding 灰区候选拼图（M3b，
-  # vlm_sheets/vlm_analysis 表）。VLM 不逐对全量跑。
-  sheet_size: 8              # 每张 contact sheet 的候选图数
-  gray_zone: [0.35, 0.55]    # embedding 相似度灰区，进入 VLM 裁决的区间
+# M3 Agent 层（自然语言查询/分析，只读工具 API）。
+# 后端为本机 llama-server（OpenAI 兼容 /v1/chat/completions，原生 function
+# calling）。显存吃紧时降低 context window 即可（Qwen3.8-27B Q4 ≈16-20G）。
+llama:
+  base_url: "http://100.118.117.1:8080"
+  model: "D:\\AIModels\\Qwen3.8-27B\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"
+  max_tokens: 4096
+  http_timeout: 120
+  # Qwen3 的 thinking 模式会先消耗大量 token 才输出，工具调用场景必须关掉。
+  # llama.cpp 原生支持顶层 chat_template_kwargs。
+  extra:
+    chat_template_kwargs:
+      enable_thinking: false
+  # Agent 护栏（M3 spec）：单任务 LLM 轮次/工具调用上限、墙钟预算、
+  # 单次工具结果回灌模型的截断长度。
+  agent:
+    max_steps: 12
+    max_tool_calls: 20
+    max_seconds: 180
+    max_result_chars: 6000
 
 logging:
   level: INFO

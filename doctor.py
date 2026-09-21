@@ -32,20 +32,26 @@ def run_checks(cfg: dict):
         _import_check("imagehash", "imagehash（M1）", True),
     ]
 
-    endpoint = (cfg.get("vlm") or {}).get("endpoint", "")
-    if not endpoint:
-        results.append(("—", "VLM endpoint 未配置（M3 需要，不阻塞 M0–M2）"))
+    llama = cfg.get("llama") or {}
+    base_url = (llama.get("base_url") or "").rstrip("/")
+    if not base_url:
+        results.append(("—", "llama 后端未配置（M3 需要，不阻塞 M0–M2）"))
     else:
         try:
             with urllib.request.urlopen(
-                endpoint.rstrip("/") + "/models", timeout=5
+                base_url + "/v1/models", timeout=5
             ) as response:
                 data = json.loads(response.read())
-            models = [item.get("id") for item in data.get("data", [])]
-            results.append(
-                ("✓", f"VLM endpoint 可达 | 模型：{', '.join(models) or '(无)'}")
-            )
+            models = [item.get("name") or item.get("id") for item in data.get("models", [])]
+            model_cfg = llama.get("model") or ""
+            loaded = model_cfg in models if model_cfg else bool(models)
+            if loaded:
+                results.append(("✓", f"llama 后端可达 | 模型已加载：{model_cfg}"))
+            elif models:
+                results.append(("⚠", f"llama 后端可达但配置模型未加载 | 已加载：{', '.join(models) or '(无)'}"))
+            else:
+                results.append(("⚠", "llama 后端可达但未加载任何模型"))
         except Exception as exc:
-            results.append(("✗", f"VLM endpoint 不可达：{exc}"))
+            results.append(("✗", f"llama 后端不可达：{exc}"))
 
     return results
