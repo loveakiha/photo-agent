@@ -401,6 +401,40 @@ def intent(
         )
 
 
+@app.command(name="select")
+def select_photos(
+    text: str = typer.Argument(..., help="自然语言意图，例如：刚从杭州回来，想发个朋友圈"),
+    n: int = typer.Option(5, "--n", help="返回前 N 名（默认 5）"),
+    floor: float = typer.Option(0.0, "--floor", help="语义分下限（质量过滤）"),
+):
+    """M3.3：端到端意图 → 选择 pipeline（零 VLM）。
+
+    User Intent → Photo Retrieval → Quality Filtering →
+    Similarity Reduction → Taste Profile → Candidate Ranking。
+
+    例：python cli.py select "刚旅行回来，想发个朋友圈" --n 5
+    """
+    from pipeline import select_photos as _run_pipeline, pipeline_summary
+
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        result = _run_pipeline(conn, text, n=n, semantic_score_floor=floor)
+    finally:
+        conn.close()
+
+    print(f"意图：{intent_summary(result['intent'])}")
+    print(pipeline_summary(result))
+    print(f"\n最终候选（{len(result['candidates'])} 张）：")
+    for i, c in enumerate(result["candidates"], 1):
+        person = c["person"] if c["person"] else "-"
+        print(
+            f"{i}. {c['rel_path']}  场景={c['scene'] or '-'}  person={person}  "
+            f"语义 {c['semantic_score']:.0f} + 偏置 {c['bias']:+.2f} "
+            f"= {c['final_score']:.1f}"
+        )
+
+
 @app.command()
 def taste(
     show_json: bool = typer.Option(False, "--json", help="输出 JSON（供后续阶段消费）"),

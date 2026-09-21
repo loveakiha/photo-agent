@@ -41,7 +41,7 @@ PRESETS: list[tuple[str, dict]] = [
     # Each preset maps to a partial intent. Longer phrases are matched first.
     ("想显得最近生活很丰富", {
         "intent_type": "want_rich_life",
-        "scene": None,
+        "scene": "风景",
         "person": None,
         "person_required": False,
         "tone": "refined",
@@ -73,7 +73,7 @@ PRESETS: list[tuple[str, dict]] = [
     }),
     ("最近生活不错", {
         "intent_type": "life_good_recently",
-        "scene": None,
+        "scene": "风景",
         "person": None,
         "person_required": False,
         "tone": "refined",
@@ -110,8 +110,7 @@ _SCENE_KEYWORDS = [
     ("风景", ["风景", "山", "海", "湖", "公园", "花园", "旅行", "出游",
              "郊外", "徒步", "爬山", "海边", "沙滩", "森林", "草地", "园林",
              "街景", "城市", "夜景", "日落", "日出", "天空", "晚霞", "云海"]),
-    ("人像", ["人像", "自拍", "我", "朋友", "合影", "人物", "女朋友", "男朋友",
-             "约会", "情侣", "闺蜜", "兄弟", "家人", "孩子", "宝宝", "孩子"]),
+    ("人像", ["人像", "自拍", "合影", "人物照", "人物", "肖像", "大头照"]),
     ("食物", ["食物", "美食", "吃饭", "餐厅", "菜", "虾", "海鲜", "烤肉",
              "火锅", "寿司", "日料", "蛋糕", "甜品", "咖啡", "奶茶", "早餐",
              "午餐", "晚餐", "宵夜"]),
@@ -154,12 +153,27 @@ def parse_intent(text: str) -> dict:
     if not s:
         return _empty_intent()
 
-    # 1. Preset match (longest first).
+    # 1. Preset match (longest first). Free-form signals detected in the
+    #    same sentence override the preset's defaults — an explicit "人像"
+    #    wins over a preset that defaults to "风景".
     for phrase, preset in _sorted_presets():
         if phrase in s:
+            scene = _detect_scene(s) or preset.get("scene")
+            person, person_required = _detect_person(s)
+            if person is None:
+                person, person_required = preset.get("person"), preset.get("person_required", False)
+            tone = _detect_tone(s) or preset.get("tone")
+            # Only override time_scope if an explicit time keyword is present.
+            ts = _detect_time(s)
+            time_scope = ts if ts != "all" else preset.get("time_scope", "all")
             return {
-                **preset,
+                "intent_type": preset["intent_type"],
+                "scene": scene,
+                "person": person,
+                "person_required": person_required,
+                "tone": tone,
                 "exclude_overdone": _has_exclude_overdone(s),
+                "time_scope": time_scope,
                 "_matched_preset": phrase,
             }
 

@@ -111,12 +111,11 @@ def test_freeform_food_recent():
 
 
 def test_freeform_tone_refined():
-    # "今天心情不错" matches the feeling_good_today preset, whose tone is
-    # "natural". The free-form "精致" tone is NOT merged into a preset match,
-    # so tone stays the preset's value.
+    # "今天心情不错" matches feeling_good_today (preset tone=natural), but the
+    # user also explicitly says "精致" -> free-form tone overrides the preset.
     p = parse_intent("今天心情不错，想要精致点的照片")
     assert p["intent_type"] == "feeling_good_today"
-    assert p["tone"] == "natural"
+    assert p["tone"] == "refined"
 
 
 def test_freeform_time_today():
