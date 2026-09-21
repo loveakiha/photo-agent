@@ -15,6 +15,7 @@ from doctor import run_checks
 from duplicate import build_exact_groups
 from near import build_near_groups, threshold_groups
 from quality import DEFAULT_LONG_EDGE, DEFAULT_THRESHOLDS, QUALITY_VERSION, run_quality
+from policy import run_policy, user_confirm
 from report import write_report
 from scanner import scan as run_scan
 from similarity import DEFAULT_PHASH_THRESHOLD, DEFAULT_DHASH_THRESHOLD
@@ -229,6 +230,63 @@ def dedup():
     print(
         f"精确重复：{result['exact_groups']} 组，"
         f"{result['duplicates']} 个文件标记 DUPLICATE（原图未动）"
+    )
+
+
+@app.command()
+def decide(
+    kinds: str = typer.Option("exact,near", "--kinds", help="参与决策的组类型（逗号分隔：exact,near）"),
+):
+    """M3b：Decision Policy（只写 decisions 建议行，绝不删文件/改照片/改分组）。
+
+    输入=已入库的客观事实（质量/分辨率/元数据/分组），输出=代表照片建议+
+    每个候选的 reason/evidence。用户确认后用 confirm 命令落最终决定。
+    """
+    kind_list = tuple(k.strip() for k in kinds.split(",") if k.strip())
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        result = run_policy(conn, kinds=kind_list)
+    finally:
+        conn.close()
+    s = result["stats"]
+    print(
+        f"Decision Policy (m3b-v1)：{s['groups']} 组参与决策 | "
+        f"KEEP 建议 {s['keep']} / DISCARD 建议 {s['discard']} | "
+        f"用户已决定(跳过) {s['user_ignored']}"
+    )
+    for row in result["summary"][:20]:
+        print(
+            f"  组 {row['group_id']} [{row['kind']}] "
+            f"代表: {row['representative']} ({row['members']} 成员)"
+        )
+    if len(result["summary"]) > 20:
+        print(f"  … 其余 {len(result['summary']) - 20} 组见 report/decisions 表")
+
+
+@app.command(name="confirm")
+def confirm_cmd(
+    group_id: int = typer.Option(..., "--group", help="组 id（见 decide 输出或 report）"),
+    keep: int = typer.Option(..., "--keep", help="用户选定保留的 photo_id"),
+    ignore: bool = typer.Option(
+        False, "--ignore", help="其余成员保持未决定（默认 DISCARD）"
+    ),
+):
+    """M3b：用户确认某组的最终决定（写 source='user' 行，policy 永不再覆盖）。"""
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        result = user_confirm(
+            conn, group_id, keep, others=("IGNORE",) if ignore else ("DISCARD",)
+        )
+    except ValueError as exc:
+        typer.secho(f"确认失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    finally:
+        conn.close()
+    print(
+        f"已确认组 {result['group_id']} [{result['kind']}]："
+        f"KEEP photo_id={result['keep']}，其余 {result['others']}"
     )
 
 

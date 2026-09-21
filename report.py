@@ -178,8 +178,9 @@ def write_report(
             lines.append(f"![组 G{group['group_id']:03d} 拼图](contact/{sheet.name})")
 
     lines.extend(_quality_section(conn, reports_dir, thumbs_dir))
+    lines.extend(_decision_section(conn))
 
-    lines.extend(["", "---", "*photo-agent M2 · V1 不删除/不移动原图*"])
+    lines.extend(["", "---", "*photo-agent M3b · V1 不删除/不移动原图*"])
     text = "\n".join(lines)
     out.write_text(text, encoding="utf-8")
     (reports_dir / "latest.md").write_text(text, encoding="utf-8")
@@ -291,4 +292,64 @@ def _quality_section(conn, reports_dir: Path, thumbs_dir: Path | None) -> list:
         "按最差维度分降序——三维度都尽量高的照片",
         best5,
     ))
+    return lines
+
+
+def _decision_section(conn) -> list:
+    """M3b decision section: policy recommendations + user confirmations.
+
+    Reads only decisions rows (source='policy' or 'user'); never computes.
+    """
+    policy_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM decisions WHERE source='policy'"
+    ).fetchone()["c"]
+    user_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM decisions WHERE source='user'"
+    ).fetchone()["c"]
+    if not policy_count and not user_count:
+        return [
+            "",
+            "## 决策建议（M3b · 尚未运行，执行 `python cli.py decide`）",
+        ]
+
+    lines = [
+        "",
+        "## 决策建议（M3b · m3b-v1）",
+        "",
+        f"- Policy 建议行：**{policy_count}**（`decide` 生成，可随时重算）",
+        f"- 用户确认行：**{user_count}**（`confirm` 生成，policy 不再覆盖）",
+        "- 生命周期：FACT → POLICY_RECOMMENDATION → USER_REVIEW → USER_CONFIRMED → EXECUTABLE（M4 才执行删除）",
+        "- 本节只列**最近 10 个组的建议**；完整明细在 `decisions` 表",
+    ]
+
+    rows = conn.execute(
+        """
+        SELECT g.group_id, g.kind, d.photo_id, d.status, d.reason, d.source,
+               p.rel_path
+        FROM decisions d
+        JOIN group_members gm ON gm.photo_id = d.photo_id
+        JOIN groups g ON g.group_id = gm.group_id
+        JOIN photos p ON p.photo_id = d.photo_id
+        WHERE d.source IN ('policy', 'user')
+          AND g.kind IN ('exact', 'near')
+        ORDER BY g.group_id DESC, d.photo_id
+        """
+    ).fetchall()
+    seen: set[int] = set()
+    shown = 0
+    current_group: int | None = None
+    for row in rows:
+        if row["group_id"] not in seen:
+            seen.add(row["group_id"])
+            shown += 1
+            if shown > 10:
+                break
+            current_group = row["group_id"]
+            lines.extend(["", f"### 组 G{row['group_id']:03d}（{row['kind']}）"])
+        if current_group != row["group_id"]:
+            continue
+        marker = "★" if row["status"] in ("POLICY_KEEP", "KEEP") else " "
+        who = "用户" if row["source"] == "user" else "policy"
+        lines.append(f"- {marker} [{who}] `{row['rel_path']}` — {row['status']}")
+        lines.append(f"  - reason: {row['reason']}")
     return lines
