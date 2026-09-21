@@ -5,12 +5,13 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 # version -> migration script; applied once per version, in ascending order
 _MIGRATION_SCRIPTS = {
     1: "001_initial.sql",
     2: "002_m1.sql",
+    3: "003_m2.sql",
 }
 
 
@@ -316,6 +317,80 @@ def get_photo_hashes(conn: sqlite3.Connection, photo_id: int) -> dict | None:
     if row is None:
         return None
     return {"phash": row["phash"], "dhash": row["dhash"]}
+
+
+def has_quality(
+    conn: sqlite3.Connection,
+    photo_id: int,
+    algorithm_version: str,
+    sha256: str,
+) -> bool:
+    """True only if a complete quality row exists for the CURRENT algorithm
+    version AND the same content hash. A row from an older version, or one
+    bound to different bytes (a file that changed since), forces
+    recomputation — same invalidation convention as M1 photo_hashes."""
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM quality
+        WHERE photo_id = ?
+          AND algorithm_version = ?
+          AND sha256 = ?
+          AND sharpness_raw IS NOT NULL
+          AND exposure_raw IS NOT NULL
+          AND noise_raw IS NOT NULL
+        """,
+        (photo_id, algorithm_version, sha256),
+    ).fetchone()
+    return row is not None
+
+
+def upsert_quality(
+    conn: sqlite3.Connection,
+    photo_id: int,
+    raw: dict[str, float],
+    scores: dict[str, float],
+    quality_score: float | None,
+    algorithm_version: str,
+    sha256: str,
+):
+    """Insert/replace the quality row. ``quality_score`` stays NULL until the
+    aggregation formula is frozen (M2 decision: do not write an unfrozen
+    interpretation)."""
+    conn.execute(
+        """
+        INSERT INTO quality
+          (photo_id, sha256,
+           sharpness_raw, exposure_raw, noise_raw,
+           sharpness, exposure, noise,
+           quality_score, algorithm_version, computed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(photo_id) DO UPDATE SET
+          sha256 = excluded.sha256,
+          sharpness_raw = excluded.sharpness_raw,
+          exposure_raw = excluded.exposure_raw,
+          noise_raw = excluded.noise_raw,
+          sharpness = excluded.sharpness,
+          exposure = excluded.exposure,
+          noise = excluded.noise,
+          quality_score = excluded.quality_score,
+          algorithm_version = excluded.algorithm_version,
+          computed_at = excluded.computed_at
+        """,
+        (
+            photo_id,
+            sha256,
+            raw["sharpness_raw"],
+            raw["exposure_raw"],
+            raw["noise_raw"],
+            scores["sharpness"],
+            scores["exposure"],
+            scores["noise"],
+            quality_score,
+            algorithm_version,
+            _now(),
+        ),
+    )
 
 
 def add_group(conn: sqlite3.Connection, kind: str, rep_photo_id: int, size: int) -> int:

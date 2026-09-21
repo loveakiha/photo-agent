@@ -12,6 +12,7 @@ from database import connect
 from doctor import run_checks
 from duplicate import build_exact_groups
 from near import build_near_groups, threshold_groups
+from quality import DEFAULT_LONG_EDGE, DEFAULT_THRESHOLDS, QUALITY_VERSION, run_quality
 from report import write_report
 from scanner import scan as run_scan
 from similarity import DEFAULT_PHASH_THRESHOLD, DEFAULT_DHASH_THRESHOLD
@@ -54,6 +55,15 @@ def thumbs_dir(cfg: dict) -> Path:
 
 def reports_dir(cfg: dict) -> Path:
     return _abs((cfg.get("output") or {}).get("reports_dir", "reports"))
+
+
+def quality_settings(cfg: dict) -> tuple[int, dict]:
+    """Effective (long_edge, thresholds) for quality computation: config
+    ``quality.*`` wins, code defaults otherwise."""
+    q = cfg.get("quality") or {}
+    long_edge = int(q.get("long_edge", DEFAULT_LONG_EDGE))
+    thresholds = q.get("thresholds") or DEFAULT_THRESHOLDS
+    return long_edge, thresholds
 
 
 def near_thresholds(cfg: dict) -> tuple[int, int]:
@@ -185,6 +195,27 @@ def near(
 
 
 @app.command()
+def quality(
+    force: bool = typer.Option(
+        False, "--force", help="忽略缓存，全量重算（默认增量：仅缺行/版本不符/sha256 变化时重算）"
+    ),
+):
+    """Stage（M2）：技术质量测量（纯本地、CPU，不碰原图）。"""
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        stats = run_quality(conn, cfg, force=force)
+    finally:
+        conn.close()
+    print(
+        f"质量测量（{QUALITY_VERSION}）：{stats.get('total', 0)} 张 | "
+        f"新算 {stats.get('computed', 0)} / "
+        f"缓存 {stats.get('cached', 0)} / "
+        f"失败 {stats.get('failed', 0)}"
+    )
+
+
+@app.command()
 def dedup():
     """Stage 1：SHA-256 精确去重（只建组 + 标记，不删除）。"""
     cfg = load_cfg()
@@ -305,7 +336,7 @@ def run_all(
     phash_threshold: int | None = typer.Option(None, "--phash", help="pHash 汉明距离阈值（默认取 config.yaml near.phash）"),
     dhash_threshold: int | None = typer.Option(None, "--dhash", help="dHash 汉明距离阈值（默认取 config.yaml near.dhash）"),
 ):
-    """scan + dedup + near + report 一条龙。"""
+    """scan + dedup + near + quality + report 一条龙。"""
     cfg = load_cfg()
     phash_threshold, dhash_threshold = resolve_thresholds(
         cfg, phash_threshold, dhash_threshold
@@ -326,6 +357,7 @@ def run_all(
             phash_threshold=phash_threshold,
             dhash_threshold=dhash_threshold,
         )
+        quality_stats = run_quality(conn, cfg)
         output = write_report(
             conn,
             reports_dir(cfg),
@@ -348,6 +380,11 @@ def run_all(
     print(
         f"近似重复（候选）：{near_result['near_groups']} 组，"
         f"{near_result['near_pairs']} 对"
+    )
+    print(
+        f"质量测量（{QUALITY_VERSION}）：新算 {quality_stats.get('computed', 0)} / "
+        f"缓存 {quality_stats.get('cached', 0)} / "
+        f"失败 {quality_stats.get('failed', 0)}"
     )
     print(f"报告：{output}")
 

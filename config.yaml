@@ -10,6 +10,23 @@ input:
 thumbnail:
   size: 256
 
+# M2 技术质量测量（Measurement 层：只抓「明显」技术问题，不做审美判断）。
+# 三个 raw 指标都在「长边 2048 的灰度图」上计算，保证跨尺寸可比。
+# thresholds 为两档线性钳制的冻结值：score = clamp((raw-low)/(high-low))，
+# noise 方向相反（raw 越低越好）。当前值由 reports/calibration/ 标定流程
+# 基于 96 张真实库 + 18 张合成坏片确定后冻结。
+quality:
+  long_edge: 2048
+  # 两档线性钳制的冻结阈值（score = clamp((raw-low)/(high-low)) 后按方向映射，
+  # noise/exposure 方向相反：raw 越低越好）。由 2026-09-21 标定实验
+  # （96 张真实库 + 21 张合成片，排序 18/18 通过）冻结：
+  thresholds:
+    sharpness: { low: 15.0, high: 550.0 }    # Laplacian 方差：真实库 p10/p90 附近
+    exposure: { low: 0.005, high: 0.05 }     # 两端裁剪率：真实库 p90 / fixture 轻裁剪档
+    noise: { low: 10.0, high: 60.0 }        # 局部方差中位数：真实库 p90 / fixture 轻噪声档
+  # quality_score 聚合公式：暂不冻结（mean/min/加权/惩罚待实验数据），
+  # 冻结前 quality_score 列留 NULL，报告只展示三维度。
+
 # M1 near 候选阈值（Hamming distance）。
 # 定稿依据：96 张 test_pics 真实库 25 组合 sweep（pHash∈{4,6,8,10,12}×dHash∈{8,10,12,14,16}），
 # 结果只随 pHash 分三档台阶、dHash 几乎不敏感；取最宽档 phash12/dhash16

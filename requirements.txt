@@ -9,5 +9,10 @@ imagehash>=4.3
 # HEIC/HEIF support (iPhone originals); required when config lists .heic
 pillow-heif>=0.16
 
+# M2 dependencies (technical quality measurement, CPU-only)
+opencv-python>=4.9
+numpy>=1.26
+
 # Later milestones
-# opencv-python>=4.9
+# torch / clip (M3a embeddings)
+# ollama client (M3b VLM)

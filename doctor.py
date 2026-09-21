@@ -28,13 +28,13 @@ def run_checks(cfg: dict):
         _import_check("pytest", "Pytest", True),
         _import_check("pillow_heif", "pillow-heif（HEIC）", True),
         _import_check("numpy", "numpy（M1）", False),
-        _import_check("cv2", "OpenCV（M1）", False),
+        _import_check("cv2", "OpenCV（M2）", True),
         _import_check("imagehash", "imagehash（M1）", True),
     ]
 
     endpoint = (cfg.get("vlm") or {}).get("endpoint", "")
     if not endpoint:
-        results.append(("—", "VLM endpoint 未配置（M2 需要，不阻塞 M0）"))
+        results.append(("—", "VLM endpoint 未配置（M3 需要，不阻塞 M0–M2）"))
     else:
         try:
             with urllib.request.urlopen(

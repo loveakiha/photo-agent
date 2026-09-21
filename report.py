@@ -177,8 +177,78 @@ def write_report(
         if sheet is not None:
             lines.append(f"![组 G{group['group_id']:03d} 拼图](contact/{sheet.name})")
 
-    lines.extend(["", "---", "*photo-agent M1 · V1 不删除/不移动原图*"])
+    lines.extend(_quality_section(conn))
+
+    lines.extend(["", "---", "*photo-agent M2 · V1 不删除/不移动原图*"])
     text = "\n".join(lines)
     out.write_text(text, encoding="utf-8")
     (reports_dir / "latest.md").write_text(text, encoding="utf-8")
     return out
+
+
+def _quality_section(conn) -> list:
+    """M2 quality section: three dimension distributions + low-score board.
+
+    ``quality_score`` is intentionally absent — the aggregation formula is
+    not frozen yet, so the report shows only the measured dimensions.
+    """
+    rows = conn.execute(
+        """
+        SELECT q.*, p.rel_path
+        FROM quality q JOIN photos p ON p.photo_id = q.photo_id
+        """
+    ).fetchall()
+    if not rows:
+        return [
+            "",
+            "## 质量评分（M2 · 尚未计算，运行 `quality` 命令）",
+        ]
+
+    def stats(name: str) -> str:
+        values = sorted(r[name] for r in rows if r[name] is not None)
+        n = len(values)
+        if not n:
+            return "(无)"
+        return (
+            f"min {values[0]:.3g} / p10 {values[min(n - 1, max(0, int(n * 0.1)) - 1)]:.3g} "
+            f"/ median {values[n // 2]:.3g} / p90 {values[min(n - 1, int(n * 0.9))]:.3g} "
+            f"/ max {values[-1]:.3g}"
+        )
+
+    version = rows[0]["algorithm_version"]
+    lines = [
+        "",
+        f"## 质量评分（M2 · Measurement · {version}）",
+        "",
+        f"- 已评分照片：**{len(rows)}**",
+        "- 定位：只回答「是否存在**明显**技术问题（模糊/裁剪曝光/噪声）」；",
+        "- 维度分数：0=明显问题端，1=良好端（两档线性钳制，阈值见 config.yaml）",
+        f"- sharpness（Laplacian 方差，越高越好）：{stats('sharpness')}",
+        f"- exposure（两端裁剪率，越低越好）：{stats('exposure')}",
+        f"- noise（局部方差中位数，越低越好）：{stats('noise')}",
+        "- quality_score 暂缓：聚合公式待实验数据冻结，期间此列留空",
+        "",
+        "### 低分榜（任一维度 < 0.3 的照片，最多 10 张）",
+        "",
+        "| 照片 | sharpness | exposure | noise | 最低维度 |",
+        "|---|---:|---:|---:|---|",
+    ]
+    flagged = []
+    for r in rows:
+        dims = {
+            "sharpness": r["sharpness"],
+            "exposure": r["exposure"],
+            "noise": r["noise"],
+        }
+        worst = min(dims.items(), key=lambda kv: (kv[1] if kv[1] is not None else 1.0))
+        if worst[1] is not None and worst[1] < 0.3:
+            flagged.append((worst[1], r["rel_path"], dims, worst[0]))
+    flagged.sort()
+    if not flagged:
+        lines.append("| （无） |  |  |  |  |")
+    for _, rel_path, dims, worst_name in flagged[:10]:
+        lines.append(
+            f"| `{rel_path}` | {dims['sharpness']:.2f} | {dims['exposure']:.2f} "
+            f"| {dims['noise']:.2f} | {worst_name} |"
+        )
+    return lines

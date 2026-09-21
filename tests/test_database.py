@@ -57,7 +57,7 @@ def test_fresh_database_migrates_in_steps(tmp_path):
     try:
         assert conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
         cols = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(photo_hashes)")
@@ -82,12 +82,13 @@ def test_m0_database_is_upgraded_to_v2(tmp_path):
     conn.commit()
     conn.close()
 
-    # Now open it through the project API: it must apply 002_m1.sql
+    # Now open it through the project API: it must apply 002_m1.sql and
+    # 003_m2.sql in sequence, ending at the latest schema version.
     conn = connect(db)
     try:
         assert conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
         cols = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(photo_hashes)")
