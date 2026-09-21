@@ -18,6 +18,7 @@ from quality import DEFAULT_LONG_EDGE, DEFAULT_THRESHOLDS, QUALITY_VERSION, run_
 from policy import run_policy, user_confirm
 from report import write_report
 from scanner import scan as run_scan
+from intent import parse_intent, retrieve_candidates, intent_summary
 from semantic import analyze_batch
 from taste import (
     PROFILE_VERSION,
@@ -364,6 +365,40 @@ def analyze(
         f"不可靠 {stats['unreliable']} / 失败 {stats['failed']} "
         f"| 耗时 {stats['seconds']}s"
     )
+
+
+@app.command()
+def intent(
+    text: str = typer.Argument(..., help="自然语言意图，例如：刚从杭州回来，想发朋友圈"),
+    limit: int = typer.Option(10, "--limit", help="返回候选数上限（默认 10）"),
+    show_json: bool = typer.Option(False, "--json", help="输出结构化 intent JSON"),
+):
+    """M3.2：解析自然语言意图 → 结构化 intent + 检索候选。
+
+    例：
+      python cli.py intent "刚从杭州回来，想发个朋友圈，不要太刻意"
+      python cli.py intent "想发个约会照片，精致一点"
+      python cli.py intent "随便帮我选"
+    """
+    parsed = parse_intent(text)
+    cfg = load_cfg()
+    conn = connect(db_path(cfg))
+    try:
+        rows = retrieve_candidates(conn, parsed, limit=limit)
+    finally:
+        conn.close()
+
+    print(f"意图：{intent_summary(parsed)}")
+    if show_json:
+        print(json.dumps(parsed, ensure_ascii=False, indent=2))
+    print(f"\n候选（{len(rows)} 张，按语义分降序）：")
+    for i, r in enumerate(rows, 1):
+        score = f"{r['semantic_score']:.0f}" if r["semantic_score"] is not None else "-"
+        person = r["person"] if r["person"] else "-"
+        print(
+            f"{i}. {r['rel_path']}  场景={r['scene'] or '-'}  "
+            f"person={person}  语义分={score}"
+        )
 
 
 @app.command()
