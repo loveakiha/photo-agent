@@ -5,13 +5,14 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 # version -> migration script; applied once per version, in ascending order
 _MIGRATION_SCRIPTS = {
     1: "001_initial.sql",
     2: "002_m1.sql",
     3: "003_m2.sql",
+    4: "004_preference_tables.sql",
 }
 
 
@@ -92,6 +93,17 @@ def _purge_rows(conn: sqlite3.Connection, photo_ids: list):
             conn.execute(f"DELETE FROM {table} WHERE photo_id IN ({marks})", photo_ids)
         except sqlite3.OperationalError:
             continue  # table not present in this schema version
+    # preference_samples references photos through THREE columns
+    # (candidate_a/candidate_b/winner), not a single photo_id.
+    try:
+        conn.execute(
+            f"DELETE FROM preference_samples WHERE "
+            f"candidate_a IN ({marks}) OR candidate_b IN ({marks}) "
+            f"OR winner IN ({marks})",
+            photo_ids * 3,
+        )
+    except sqlite3.OperationalError:
+        pass  # table not present in this schema version
     # group_members references BOTH groups and photos; groups references
     # photos. Order: members of the doomed groups -> the groups the purged
     # photos represent -> the photos rows. (groups/groups_members are
@@ -475,3 +487,138 @@ def clear_near_results(conn: sqlite3.Connection):
         """
     )
     conn.execute("DELETE FROM groups WHERE kind='near'")
+
+
+# ---------------------------------------------------------------------------
+# Preference / Creative Search reservation (schema v4, IDEA.md §22)
+#
+# Structure-only for now: no pipeline stage writes these tables yet. The
+# functions exist so M3.1+ (Taste Profile, Intent) and the future Creative
+# Search engine can use them without another schema migration.
+# ---------------------------------------------------------------------------
+
+# Valid values for preference_samples.source (IDEA.md §7 data flywheel)
+PREFERENCE_SOURCES = ("user", "model", "vlm", "inference")
+
+
+def upsert_preference_sample(
+    conn: sqlite3.Connection,
+    *,
+    candidate_a: int | None,
+    candidate_b: int | None,
+    winner: int | None,
+    source: str = "user",
+    context: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
+    user_id: str = "local",
+) -> int:
+    """Record one preference signal. ``winner`` may be NULL (un-decided
+    sample). ``sample_id`` is stable for re-deciding the same sample via
+    (candidate_a, candidate_b, user_id)."""
+    if source not in PREFERENCE_SOURCES:
+        raise ValueError(f"unknown preference source: {source!r}")
+    existing = conn.execute(
+        """
+        SELECT sample_id FROM preference_samples
+        WHERE candidate_a = ? AND candidate_b = ? AND user_id = ?
+        """,
+        (candidate_a, candidate_b, user_id),
+    ).fetchone()
+    if existing:
+        sid = existing["sample_id"]
+        conn.execute(
+            """
+            UPDATE preference_samples
+            SET winner = ?, source = ?, context = ?, confidence = ?,
+                reason = ?, timestamp = ?
+            WHERE sample_id = ?
+            """,
+            (winner, source, context, confidence, reason, _now(), sid),
+        )
+        return sid
+    cur = conn.execute(
+        """
+        INSERT INTO preference_samples
+          (candidate_a, candidate_b, winner, context, source, confidence,
+           reason, user_id, timestamp)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (candidate_a, candidate_b, winner, context, source, confidence,
+         reason, user_id, _now()),
+    )
+    return cur.lastrowid
+
+
+def list_preference_samples(
+    conn: sqlite3.Connection,
+    *,
+    user_id: str | None = None,
+    source: str | None = None,
+    winner: int | None = None,
+    undecided_only: bool = False,
+) -> list:
+    """Read preference samples (filterable by user/source/winner)."""
+    clauses, params = [], []
+    if user_id is not None:
+        clauses.append("user_id = ?"); params.append(user_id)
+    if source is not None:
+        clauses.append("source = ?"); params.append(source)
+    if winner is not None:
+        clauses.append("winner = ?"); params.append(winner)
+    if undecided_only:
+        clauses.append("winner IS NULL")
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return conn.execute(
+        f"SELECT * FROM preference_samples{where} ORDER BY timestamp",
+        params,
+    ).fetchall()
+
+
+def add_creative_candidate(
+    conn: sqlite3.Connection,
+    *,
+    prompt: str | None = None,
+    seed: int | None = None,
+    model: str | None = None,
+    parameters: str | None = None,
+    aesthetic_score: float | None = None,
+    alignment_score: float | None = None,
+    artifact_score: float | None = None,
+    human_selection: int | None = None,
+    rarity: str | None = None,
+    tier: str | None = None,
+) -> int:
+    """Record one generated/sourced creative candidate."""
+    cur = conn.execute(
+        """
+        INSERT INTO creative_candidates
+          (prompt, seed, model, parameters,
+           aesthetic_score, alignment_score, artifact_score,
+           human_selection, rarity, tier, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (prompt, seed, model, parameters,
+         aesthetic_score, alignment_score, artifact_score,
+         human_selection, rarity, tier, _now()),
+    )
+    return cur.lastrowid
+
+
+def list_creative_candidates(
+    conn: sqlite3.Connection,
+    *,
+    model: str | None = None,
+    human_selected_only: bool = False,
+) -> list:
+    """Read creative candidates (filterable by model / human selection)."""
+    clauses, params = [], []
+    if model is not None:
+        clauses.append("model = ?"); params.append(model)
+    if human_selected_only:
+        clauses.append("human_selection IS NOT NULL")
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return conn.execute(
+        f"SELECT * FROM creative_candidates{where} ORDER BY candidate_id",
+        params,
+    ).fetchall()

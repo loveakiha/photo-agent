@@ -177,7 +177,7 @@ def write_report(
         if sheet is not None:
             lines.append(f"![组 G{group['group_id']:03d} 拼图](contact/{sheet.name})")
 
-    lines.extend(_quality_section(conn))
+    lines.extend(_quality_section(conn, reports_dir, thumbs_dir))
 
     lines.extend(["", "---", "*photo-agent M2 · V1 不删除/不移动原图*"])
     text = "\n".join(lines)
@@ -186,15 +186,36 @@ def write_report(
     return out
 
 
-def _quality_section(conn) -> list:
-    """M2 quality section: three dimension distributions + low-score board.
+def _thumb_link(reports_dir: Path, thumbs_dir: Path | None, sha: str | None,
+                rel_path: str) -> str:
+    """Embed a photo's thumbnail in the report, or fall back to a plain
+    cell. Thumbnails are SHA-256-keyed in work/thumbs (same stable-identity
+    convention as M0/M1); they are copied into reports/quality/ so the
+    report folder stays self-contained (like reports/contact/)."""
+    if not thumbs_dir or not sha:
+        return ""
+    src = Path(thumbs_dir) / f"{sha}.jpg"
+    if not src.is_file():
+        return ""
+    dst_dir = reports_dir / "quality"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / f"{sha}.jpg"
+    if not dst.exists():
+        dst.write_bytes(src.read_bytes())
+    return f"![{rel_path}](quality/{dst.name})"
+
+
+def _quality_section(conn, reports_dir: Path, thumbs_dir: Path | None) -> list:
+    """M2 quality section: distributions + worst/best Top 5 boards.
 
     ``quality_score`` is intentionally absent — the aggregation formula is
     not frozen yet, so the report shows only the measured dimensions.
+    Each board row embeds its thumbnail (copied from the SHA-256-keyed
+    work/thumbs into reports/quality/, same convention as contact/).
     """
     rows = conn.execute(
         """
-        SELECT q.*, p.rel_path
+        SELECT q.*, p.rel_path, p.sha256
         FROM quality q JOIN photos p ON p.photo_id = q.photo_id
         """
     ).fetchall()
@@ -216,6 +237,12 @@ def _quality_section(conn) -> list:
         )
 
     version = rows[0]["algorithm_version"]
+    dims = ("sharpness", "exposure", "noise")
+
+    def min_dim(r):
+        values = [r[d] for d in dims if r[d] is not None]
+        return min(values) if values else None
+
     lines = [
         "",
         f"## 质量评分（M2 · Measurement · {version}）",
@@ -226,29 +253,42 @@ def _quality_section(conn) -> list:
         f"- sharpness（Laplacian 方差，越高越好）：{stats('sharpness')}",
         f"- exposure（两端裁剪率，越低越好）：{stats('exposure')}",
         f"- noise（局部方差中位数，越低越好）：{stats('noise')}",
-        "- quality_score 暂缓：聚合公式待实验数据冻结，期间此列留空",
-        "",
-        "### 低分榜（任一维度 < 0.3 的照片，最多 10 张）",
-        "",
-        "| 照片 | sharpness | exposure | noise | 最低维度 |",
-        "|---|---:|---:|---:|---|",
+        "- quality_score 暂缓：聚合公式待实验数据冻结，期间此列留空；",
+        "  排序暂用「最差维度分」（三维度取最低）作为临时综合信号",
     ]
-    flagged = []
-    for r in rows:
-        dims = {
-            "sharpness": r["sharpness"],
-            "exposure": r["exposure"],
-            "noise": r["noise"],
-        }
-        worst = min(dims.items(), key=lambda kv: (kv[1] if kv[1] is not None else 1.0))
-        if worst[1] is not None and worst[1] < 0.3:
-            flagged.append((worst[1], r["rel_path"], dims, worst[0]))
-    flagged.sort()
-    if not flagged:
-        lines.append("| （无） |  |  |  |  |")
-    for _, rel_path, dims, worst_name in flagged[:10]:
-        lines.append(
-            f"| `{rel_path}` | {dims['sharpness']:.2f} | {dims['exposure']:.2f} "
-            f"| {dims['noise']:.2f} | {worst_name} |"
-        )
+
+    def board(title: str, note: str, entries):
+        out = ["", f"### {title}", "", note, "",
+               "| 缩略图 | 照片 | sharpness | exposure | noise | 最差维度 |",
+               "|:---:|---|---:|---:|---:|---|"]
+        if not entries:
+            out.append("|  | （无） |  |  |  |  |")
+        for rel_path, d, sha in entries:
+            worst_name = min(dims, key=lambda k: d[k] if d[k] is not None else 1.0)
+            img = _thumb_link(reports_dir, thumbs_dir, sha, rel_path)
+            out.append(
+                f"| {img} | `{rel_path}` | {d['sharpness']:.2f} | {d['exposure']:.2f} "
+                f"| {d['noise']:.2f} | {worst_name} |"
+            )
+        return out
+
+    ranked = [
+        (min_dim(r), r["rel_path"], r["sha256"],
+         {"sharpness": r["sharpness"], "exposure": r["exposure"], "noise": r["noise"]})
+        for r in rows if min_dim(r) is not None
+    ]
+    ranked.sort()
+    worst5 = [(rel, d, sha) for _, rel, sha, d in ranked[:5]]
+    best5 = [(rel, d, sha) for _, rel, sha, d in reversed(ranked[-5:])]
+
+    lines.extend(board(
+        "最差 Top 5（技术风险最高）",
+        "按最差维度分升序——任一维度明显偏低的问题照片",
+        worst5,
+    ))
+    lines.extend(board(
+        "最好 Top 5（技术质量最稳）",
+        "按最差维度分降序——三维度都尽量高的照片",
+        best5,
+    ))
     return lines

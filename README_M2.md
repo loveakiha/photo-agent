@@ -54,7 +54,7 @@ score = clamp(1 - (raw - low) / (high - low)) # lower-is-better
 .venv/Scripts/python -m cli all --dir <目录>   # scan→hash→near→quality→report
 ```
 
-报告新增「质量评分」段：三维度分布 + 低分榜（任一维度 < 0.3，最多 10 张）。
+- 报告新增「质量评分」段：三维度分布 + 最差 Top 5 + 最好 Top 5（按最差维度分排序）。
 
 ## 缓存与失效
 
