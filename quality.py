@@ -27,6 +27,7 @@ from pathlib import Path
 import cv2
 import heif  # registers the HEIF opener (no-op if pillow-heif is missing)
 import numpy as np
+from PIL import Image, ImageOps
 
 QUALITY_VERSION = "m2-v1"
 
@@ -45,26 +46,50 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
 RawResult = dict[str, float]
 
 
+def _load_pil_bgr(path: Path, long_edge: int) -> np.ndarray | None:
+    """Pillow fallback for formats cv2 cannot decode (HEIC/HEIF).
+
+    Uses the registered HEIF opener (via ``import heif``) and applies
+    EXIF orientation the same way the M0/M1 modules do (thumbnails.py,
+    hashes.py). Returns an HxWx3 BGR uint8 array.
+    """
+    try:
+        with Image.open(path) as im:
+            im = ImageOps.exif_transpose(im)
+            im = im.convert("RGB").resize(
+                (max(1, round(im.width * long_edge / max(im.width, im.height))),
+                 max(1, round(im.height * long_edge / max(im.width, im.height)))),
+                Image.Resampling.LANCZOS if long_edge < max(im.width, im.height) else Image.Resampling.BILINEAR,
+            )
+            return np.array(im)[:, :, ::-1]  # RGB -> BGR
+    except (OSError, ValueError):
+        return None
+
+
 def _load_gray(path: str | Path, long_edge: int) -> np.ndarray | None:
     """Read -> EXIF-orient -> downscale to long edge -> 8-bit grayscale."""
     path = Path(path)
     data = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if data is None:
-        return None
-    h, w = data.shape[:2]
-    scale = long_edge / max(h, w)
-    if scale < 1.0:
-        data = cv2.resize(
-            data,
-            (max(1, round(w * scale)), max(1, round(h * scale))),
-            interpolation=cv2.INTER_AREA,
-        )
-    elif scale > 1.0:
-        data = cv2.resize(
-            data,
-            (max(1, round(w * scale)), max(1, round(h * scale))),
-            interpolation=cv2.INTER_LINEAR,
-        )
+        # cv2 cannot decode this format (e.g. HEIC) -> Pillow fallback.
+        data = _load_pil_bgr(path, long_edge)
+        if data is None:
+            return None
+    else:
+        h, w = data.shape[:2]
+        scale = long_edge / max(h, w)
+        if scale < 1.0:
+            data = cv2.resize(
+                data,
+                (max(1, round(w * scale)), max(1, round(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        elif scale > 1.0:
+            data = cv2.resize(
+                data,
+                (max(1, round(w * scale)), max(1, round(h * scale))),
+                interpolation=cv2.INTER_LINEAR,
+            )
     return cv2.cvtColor(data, cv2.COLOR_BGR2GRAY)
 
 

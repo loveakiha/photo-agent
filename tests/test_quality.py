@@ -69,6 +69,20 @@ class TestRawIndicators:
         exposure indicator must not flag it (aesthetic calls are M3b's job)."""
         assert _raw(fixtures["dark_base"])["exposure_raw"] < 0.01
 
+    def test_heic_fallback_when_cv2_cannot_decode(self, tmp_path):
+        """Regression: cv2.imdecode returns None for HEIC; the Pillow
+        fallback must still produce finite raw indicators."""
+        import heif  # noqa: F401  — ensures the opener is registered
+        from PIL import Image
+
+        path = tmp_path / "heic_fallback.heic"
+        Image.new("RGB", (900, 600), (120, 40, 200)).save(path, "HEIF")
+        raw = compute_quality_raw(path)
+        assert raw is not None
+        for key in ("sharpness_raw", "exposure_raw", "noise_raw"):
+            assert raw[key] == raw[key]  # not NaN
+            assert raw[key] >= 0.0
+
 
 class TestClampAndScore:
     def test_higher_is_better_direction(self):
