@@ -128,6 +128,17 @@ def test_pipeline_profile_reflects_user_decisions(conn):
     assert result["profile"]["n_discarded"] == 1
 
 
+def test_pipeline_discard_only_profile_does_not_crash(conn):
+    for pid in (1, 2):
+        _photo(conn, pid, f"p{pid}.jpg")
+        _semantic(conn, pid, "风景", 90.0)
+    _user_decision(conn, 1, "DISCARD")
+    _user_decision(conn, 2, "DISCARD")
+    result = select_photos(conn, "风景", n=5)
+    assert result["profile"]["n_kept"] == 0
+    assert result["profile"]["n_discarded"] == 2
+    assert result["candidates"]
+
 def test_pipeline_summary_format(conn):
     result = select_photos(conn, "随便帮我选", n=5)
     s = pipeline_summary(result)

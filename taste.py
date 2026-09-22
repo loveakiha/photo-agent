@@ -129,6 +129,13 @@ def build_taste_profile(conn: sqlite3.Connection, user_id: str = "local") -> dic
     }
     if not profile["n_samples"]:
         return profile
+    # DISCARD-only history contains negative evidence but no positive taste
+    # anchor. It cannot produce a meaningful kept-share distribution, and
+    # dividing by n_kept would otherwise crash. Keep the sample counts for
+    # auditability but leave taste features neutral until at least one KEEP
+    # signal exists.
+    if not profile["n_kept"]:
+        return profile
 
     # Baseline scene distribution across ALL analyzed photos.
     baseline_counts = {s: 0 for s in KNOWN_SCENES}

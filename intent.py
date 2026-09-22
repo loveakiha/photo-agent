@@ -23,6 +23,7 @@ a structured dict:
       tone: str | None        # "natural" | "atmosphere" | "refined" | None
       exclude_overdone: bool  # True if user said "不要太刻意" / "不要刻意"
       time_scope: str         # "today" | "recent" | "all"
+      year: int | None        # explicit calendar year, e.g. "2025年" / "去年"
     }
 
 This feeds M3.3 pipeline stage "Photo Retrieval" — the first stage after
@@ -32,9 +33,12 @@ Profile / Candidate Ranking / Composition.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import datetime
 
-INTENT_VERSION = "m32-v1"
+INTENT_VERSION = "m32-v2"
+RECENT_DAYS = 30
 
 # Presets from IDEA §M3.2 — order matters for matching (longest first).
 PRESETS: list[tuple[str, dict]] = [
@@ -174,6 +178,7 @@ def parse_intent(text: str) -> dict:
                 "tone": tone,
                 "exclude_overdone": _has_exclude_overdone(s),
                 "time_scope": time_scope,
+                "year": _detect_year(s),
                 "_matched_preset": phrase,
             }
 
@@ -190,6 +195,7 @@ def parse_intent(text: str) -> dict:
         "tone": tone,
         "exclude_overdone": _has_exclude_overdone(s),
         "time_scope": time_scope,
+        "year": _detect_year(s),
     }
 
 
@@ -202,6 +208,7 @@ def _empty_intent() -> dict:
         "tone": None,
         "exclude_overdone": False,
         "time_scope": "all",
+        "year": None,
     }
 
 
@@ -218,21 +225,26 @@ def _detect_scene(text: str) -> str | None:
 
 
 def _detect_person(text: str) -> tuple[bool | None, bool]:
-    """Returns (person, person_required).
+    """Return (person, person_required) without treating the pronoun "我" as a
+    person request by itself.
 
-    person=None means "no preference"; True = require person;
-    False = exclude person-only frames (but not photos with no person at
-    all — a landscape with a person in the distance still counts).
-    person_required=True only when an explicit person signal is present.
+    The old rule matched any occurrence of "我", so ordinary requests such as
+    "我想发海边照片" accidentally became person-required. Explicit visual
+    signals are required now.
     """
-    # Negative person signals first.
-    if any(kw in text for kw in ["不要我", "不露脸", "别露脸", "不要露脸",
-                                  "没有人", "不想出现", "不要出镜", "别出镜"]):
+    negative = [
+        "不要我", "不露脸", "别露脸", "不要露脸", "没有人",
+        "不想出现", "不要出镜", "别出镜", "不要人物", "不要有人",
+    ]
+    if any(kw in text for kw in negative):
         return False, False
-    # Positive person signals.
-    if any(kw in text for kw in ["我", "朋友", "合影", "人物", "女朋友",
-                                  "男朋友", "约会", "情侣", "闺蜜", "家人",
-                                  "孩子", "宝宝"]):
+
+    positive = [
+        "我的自拍", "我露脸", "有我", "带我", "我出镜", "我的照片",
+        "朋友", "合影", "人物", "女朋友", "男朋友", "约会", "情侣",
+        "闺蜜", "家人", "孩子", "宝宝", "自拍",
+    ]
+    if any(kw in text for kw in positive):
         return True, True
     return None, False
 
@@ -252,6 +264,21 @@ def _detect_time(text: str) -> str:
                 return scope
     return "all"
 
+
+
+def _detect_year(text: str) -> int | None:
+    """Detect an explicit calendar year or common relative-year phrase."""
+    match = re.search(r"(?:19|20)\d{2}年?", text)
+    if match:
+        return int(match.group(0).rstrip("年"))
+    current = datetime.now().year
+    if "去年" in text:
+        return current - 1
+    if "前年" in text:
+        return current - 2
+    if "今年" in text:
+        return current
+    return None
 
 def _has_exclude_overdone(text: str) -> bool:
     return any(p in text for p in _EXCLUDE_OVERDONE_PATTERNS)
@@ -292,29 +319,43 @@ def retrieve_candidates(conn: sqlite3.Connection, intent: dict,
     Intent filters:
       * scene  → semantic.scene = ?
       * person → require OR exclude person-present frames
-      * (time_scope is a hint, not a hard filter, until M3.3 full pipeline
-        lands — taken_at is already stored per photo and can be added here
-        when the user's intent specifies a date.)
+      * year → explicit calendar-year filter (including 去年/前年/今年)
+      * time_scope → today/recent filters; recent means the last RECENT_DAYS
+        calendar days relative to the local machine date
     """
     scene = intent.get("scene")
     person = intent.get("person")
+    year = intent.get("year")
+    time_scope = intent.get("time_scope", "all")
 
     where = ["1=1"]
     params: list = []
     if scene:
         where.append("sa.scene = ?")
         params.append(scene)
+    if year is not None:
+        where.append("p.taken_at IS NOT NULL AND CAST(substr(p.taken_at, 1, 4) AS INTEGER) = ?")
+        params.append(int(year))
+    if time_scope == "today":
+        where.append("p.taken_at IS NOT NULL AND date(p.taken_at) = date('now', 'localtime')")
+    elif time_scope == "recent" and year is None:
+        where.append(
+            f"p.taken_at IS NOT NULL AND date(p.taken_at) >= "
+            f"date('now', 'localtime', '-{RECENT_DAYS} days')"
+        )
+
     if person is True:
         where.append("""(
             sa.person IS NOT NULL
-            AND sa.person NOT IN ('', 'false', '0', 'no')
+            AND sa.person NOT IN ('', 'false', '0', 'no', 'null')
         )""")
     elif person is False:
-        # "don't show my face" → prefer frames without people; but we don't
-        # hard-filter (a landscape that happens to include a person is fine).
+        # Negative person intent is a hard retrieval filter in M3.3.
+        # If the user wants "landscape but a distant person is acceptable",
+        # that is a later soft-ranking/composition concern.
         where.append("""(
             sa.person IS NULL
-            OR sa.person IN ('', 'false', '0', 'no')
+            OR sa.person IN ('', 'false', '0', 'no', 'null')
         )""")
 
     sql = f"""
@@ -337,6 +378,8 @@ def intent_summary(intent: dict) -> str:
     if intent.get("intent_type") == "empty":
         return "（空意图 — 没有输入）"
     parts = [f"intent={intent['intent_type']}"]
+    if intent.get("year") is not None:
+        parts.append(f"year={intent['year']}")
     if intent.get("scene"):
         parts.append(f"scene={intent['scene']}")
     if intent.get("person") is True:

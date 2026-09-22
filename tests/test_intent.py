@@ -56,6 +56,22 @@ def test_empty_intent():
     assert p["time_scope"] == "all"
 
 
+def test_freeform_pronoun_does_not_require_person():
+    p = parse_intent("我想发海边照片")
+    assert p["scene"] == "风景"
+    assert p["person"] is None
+
+
+def test_explicit_year_is_parsed():
+    p = parse_intent("2025年拍的旅行照片")
+    assert p["year"] == 2025
+
+
+def test_relative_year_is_parsed():
+    from datetime import datetime
+
+    assert parse_intent("去年拍的照片")["year"] == datetime.now().year - 1
+
 def test_preset_just_back_from_trip():
     p = parse_intent("刚旅行回来，想发个朋友圈")
     assert p["intent_type"] == "just_back_from_trip"
@@ -176,6 +192,14 @@ def test_retrieve_candidates_exclude_person(conn):
     assert len(rows) == 1
     assert rows[0]["photo_id"] == 1
 
+
+def test_retrieve_candidates_year_filter(conn):
+    _photo(conn, 1, "old.jpg", "2025-06-01T12:00:00")
+    _photo(conn, 2, "new.jpg", "2026-06-01T12:00:00")
+    _semantic(conn, 1, "风景", 90.0)
+    _semantic(conn, 2, "风景", 91.0)
+    rows = retrieve_candidates(conn, parse_intent("2025年的风景"), limit=10)
+    assert [r["photo_id"] for r in rows] == [1]
 
 def test_intent_summary():
     p = parse_intent("刚旅行回来，想发个朋友圈，不要太刻意")

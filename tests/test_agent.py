@@ -162,6 +162,13 @@ class TestSinglePhoto:
         assert out["quality"]["sharpness"] == pytest.approx(0.7)
         assert out["groups"] == []
 
+    def test_get_photo_with_group(self, db):
+        pid = insert_photo(db, "x.jpg")
+        make_group(db, "near", pid, [pid])
+        out = call_tool(db, "get_photo", {"rel_path": "x.jpg"})
+        assert len(out["groups"]) == 1
+        assert out["groups"][0]["is_representative"] is True
+
     def test_get_photo_not_found(self, db):
         out = call_tool(db, "get_photo", {"rel_path": "nope.jpg"})
         assert "error" in out

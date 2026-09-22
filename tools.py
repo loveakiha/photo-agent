@@ -255,7 +255,7 @@ def _quality_for(conn, photo_id: int) -> dict | None:
 def _groups_for_photo(conn, photo_id: int) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT g.group_id, g.kind, g.size, g.rep_photo_id, gm.sim_to_rep
+        SELECT g.group_id, g.kind, g.size, g.rep_photo_id, gm.sim_to_rep, gm.photo_id
         FROM group_members gm JOIN groups g ON g.group_id = gm.group_id
         WHERE gm.photo_id = ?
         """,

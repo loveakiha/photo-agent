@@ -112,14 +112,19 @@ def _rank_recalled(conn, recalled, intent, profile, n) -> list[dict]:
         if gid is not None:
             user_winner[gid] = row["photo_id"]
 
+    exposures: dict[int, float | None] = {}
+    if recalled:
+        marks = ",".join("?" for _ in recalled)
+        for q in conn.execute(
+            f"SELECT photo_id, exposure FROM quality WHERE photo_id IN ({marks})",
+            [r["photo_id"] for r in recalled],
+        ):
+            exposures[q["photo_id"]] = q["exposure"]
+
     scored = []
     for r in recalled:
         pid = r["photo_id"]
-        # exposure for brightness bias — pull from quality if available.
-        q = conn.execute(
-            "SELECT exposure FROM quality WHERE photo_id=?", (pid,)
-        ).fetchone()
-        exposure = q["exposure"] if q else None
+        exposure = exposures.get(pid)
         bias = taste_bias(profile, r["scene"], exposure, r["person"])
         scored.append({
             "photo_id": pid,
@@ -155,7 +160,7 @@ def pipeline_summary(result: dict) -> str:
     stages = result["stages"]
     p = result["profile"]
     lines = [
-        f"漏斗: 召回 {stages['recalled']} → 质量过滤 {stages['after_quality']} "
+        f"漏斗: 召回 {stages['recalled']} → 语义质量过滤 {stages['after_quality']} "
         f"→ 最终 {stages['final']}",
         f"画像: {p['n_kept']} KEEP / {p['n_discarded']} DISCARD "
         f"({p['n_samples']} 样本)" + ("（空）" if not p["n_samples"] else ""),
