@@ -23,6 +23,7 @@ from semantic import (
     analyze_schema,
     analyze_batch,
     get_semantic,
+    semantic_latest_join,
     upsert_semantic,
 )
 
@@ -165,6 +166,22 @@ def test_upsert_derives_person_and_rel_text(conn):
     assert row["person"] == "1人，站立"
     assert row["rel_text"] == "女性 面向 大海"
     assert json.loads(row["subjects"]) == ["女性", "大海"]
+
+
+def test_latest_join_prefers_v2_and_dedupes(conn):
+    # one photo, two prompt versions -> consumers must see exactly one row (the v2 one)
+    v1 = {"scene": "风景", "subjects": [{"name": "山"}], "defects": [], "semantic_score": 50.0}
+    upsert_semantic(conn, 1, "model-x", "m3c-v1", 1, v1)
+    v2 = {"scene": "人像", "subjects": [{"name": "女性"}], "defects": [], "semantic_score": 90.0}
+    upsert_semantic(conn, 1, "model-x", "m3c-v2", 1, v2)
+    rows = conn.execute(
+        f"""SELECT sa.scene, sa.prompt_version FROM photos p
+        {semantic_latest_join()}
+        WHERE p.photo_id = 1"""
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["scene"] == "人像"
+    assert rows[0]["prompt_version"] == "m3c-v2"
 
 
 def test_purge_cascades_semantic(conn):

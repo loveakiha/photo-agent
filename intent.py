@@ -37,6 +37,8 @@ import re
 import sqlite3
 from datetime import datetime
 
+from semantic import semantic_latest_join
+
 INTENT_VERSION = "m32-v2"
 RECENT_DAYS = 30
 
@@ -358,17 +360,18 @@ def retrieve_candidates(conn: sqlite3.Connection, intent: dict,
             OR sa.person IN ('', 'false', '0', 'no', 'null')
         )""")
 
-    sql = f"""
+    sql = (
+        f"""
         SELECT p.photo_id, p.rel_path, p.taken_at,
                sa.scene, sa.person AS person,
                sa.semantic_score, sa.subjects
         FROM photos p
-        LEFT JOIN semantic_analysis sa ON sa.photo_id = p.photo_id
-            AND sa.prompt_version = 'm3c-v2'
+        {semantic_latest_join()}
         WHERE {' AND '.join(where)}
         ORDER BY COALESCE(sa.semantic_score, 0) DESC, p.rel_path
         LIMIT ?
-    """
+        """
+    )
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]

@@ -239,6 +239,19 @@ def vlm_json_call(
     )
 
 
+def semantic_latest_join() -> str:
+    """SQL fragment joining each photo to its LATEST semantic observation.
+
+    v1 and v2 rows coexist (prompt_version strings compare naturally);
+    consumers must never see one photo twice.
+    """
+    return (
+        "LEFT JOIN semantic_analysis sa ON sa.photo_id = p.photo_id"
+        " AND sa.prompt_version = (SELECT MAX(sa2.prompt_version)"
+        " FROM semantic_analysis sa2 WHERE sa2.photo_id = p.photo_id)"
+    )
+
+
 def _subjects_to_flat(subjects: list) -> list[str]:
     """v2 rich subject objects -> v1-style flat name list (compat)."""
     out = []
