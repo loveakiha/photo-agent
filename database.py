@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 # version -> migration script; applied once per version, in ascending order
 _MIGRATION_SCRIPTS = {
@@ -14,6 +14,7 @@ _MIGRATION_SCRIPTS = {
     3: "003_m2.sql",
     4: "004_preference_tables.sql",
     5: "005_semantic.sql",
+    6: "006_semantic_profile.sql",
 }
 
 

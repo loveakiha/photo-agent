@@ -39,7 +39,7 @@ def _semantic(c, pid, scene, score, person=None):
            (photo_id, model, prompt_version, analysis_version, scene,
             subjects, person, defects, semantic_score)
            VALUES (?,?,?,?,?,?,?,?,?)""",
-        (pid, "model-x", "m3c-v1", "m3c-v1", scene,
+        (pid, "model-x", "m3c-v2", "m3c-v2", scene,
          json.dumps(["x"], ensure_ascii=False),
          json.dumps([person], ensure_ascii=False) if person else None,
          json.dumps([]), score),

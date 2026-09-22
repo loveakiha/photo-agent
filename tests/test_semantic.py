@@ -56,18 +56,18 @@ def conn():
 def _good_obs():
     return {
         "scene": "风景",
-        "subjects": ["山"],
-        "person": None,
+        "subjects": [{"name": "山", "position": "背景", "role": "主要环境"}],
+        "relationships": [],
         "defects": [],
-        "context": None,
+        "context": "日出光线",
         "semantic_score": 80.0,
         "score_components": {"clarity": 85, "subject": 90, "defects_avoided": 78},
         "raw_response": "{}",
     }
 
 
-def test_schema_version_is_5():
-    assert SCHEMA_VERSION == 5
+def test_schema_version_is_6():
+    assert SCHEMA_VERSION == 6
 
 
 def test_semantic_table_exists(conn):
@@ -131,8 +131,10 @@ def test_upsert_and_get(conn):
     got = get_semantic(conn, 1, "model-x")
     assert got is not None
     assert got["scene"] == "风景"
-    assert got["subjects"] == ["山"]
+    assert got["subjects"] == ["山"]  # flat derived from rich objects
     assert got["semantic_score"] == 80.0
+    assert isinstance(got["profile"], dict)  # full profile round-trips
+    assert got["profile"]["subjects"][0]["name"] == "山"
     # overwrite under the same key
     data = _good_obs() | {"scene": "人像", "semantic_score": 55.0}
     upsert_semantic(conn, 1, "model-x", PROMPT_VERSION, ANALYSIS_VERSION, data)
@@ -142,6 +144,27 @@ def test_upsert_and_get(conn):
     # a different model keeps its own history row
     upsert_semantic(conn, 1, "model-y", PROMPT_VERSION, ANALYSIS_VERSION, _good_obs())
     assert len(conn.execute("SELECT * FROM semantic_analysis").fetchall()) == 2
+
+
+def test_upsert_derives_person_and_rel_text(conn):
+    obs = {
+        "scene": "人像",
+        "subjects": [
+            {"name": "女性", "attributes": ["年轻"], "position": "中央",
+             "role": "主要人物", "facing": "面向大海", "action": "站立"},
+            {"name": "大海", "position": "背景", "role": "主要环境"},
+        ],
+        "relationships": ["女性 面向 大海"],
+        "defects": [],
+        "semantic_score": 92.0,
+    }
+    upsert_semantic(conn, 1, "model-x", PROMPT_VERSION, ANALYSIS_VERSION, obs)
+    row = conn.execute(
+        "SELECT person, rel_text, subjects FROM semantic_analysis WHERE photo_id=1"
+    ).fetchone()
+    assert row["person"] == "1人，站立"
+    assert row["rel_text"] == "女性 面向 大海"
+    assert json.loads(row["subjects"]) == ["女性", "大海"]
 
 
 def test_purge_cascades_semantic(conn):

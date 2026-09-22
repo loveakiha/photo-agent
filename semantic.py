@@ -26,18 +26,27 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-PROMPT_VERSION = "m3c-v1"
+PROMPT_VERSION = "m3c-v2"
 ANALYSIS_VERSION = 1
 
-# Fields the VLM must produce. (field: (kind, required, extra))
+# Flat derived columns (M3c-v1 compat): scene/subjects/person/context/
+# semantic_score are filled from the rich profile on write so every
+# existing consumer (intent/pipeline/taste) reads v2 rows unchanged.
+_FLAT_KEYS = ("scene", "subjects", "person", "defects", "context",
+              "semantic_score", "score_components")
+
+# v2 validation: (field: (kind, required, extra)) — nested structures are
+# only type-checked at the top level; the LLM is strict-JSON anyway and a
+# second retry coerces shape.  The profile dict must contain at least
+# scene + subjects + semantic_score to be stored.
 SEMANTIC_SCHEMA: dict[str, tuple] = {
     "scene": (str, True, None),
     "subjects": (list, True, None),
-    "person": (str, False, None),
+    "relationships": (list, False, None),
+    "environment": (dict, False, None),
+    "composition": (dict, False, None),
     "defects": (list, True, None),
-    "context": (str, False, None),
     "semantic_score": (float, True, (0, 100)),
-    "score_components": (dict, False, None),
 }
 
 _SYSTEM_PROMPT = (
@@ -47,17 +56,35 @@ _SYSTEM_PROMPT = (
 
 _USER_PROMPT = """请输出如下结构的 JSON（字段含义：
 - scene: 场景类别，从 [风景, 人像, 静物, 食物, 建筑, 街景, 微距, 其他] 中选一个
-- subjects: 主要主体列表，中文短语，最多 5 个
-- person: 若有人，说明人数与大致姿态；无人则为 null
+- subjects: 主要主体列表，每个主体是一个对象 {
+    name: 中文短语（如 "女性" / "大海" / "白色步道"）,
+    attributes: 可见属性数组（年龄/性别/服装/颜色/材质/外观 等，没有则空）,
+    position: 画面位置（前景/中景/背景/中央/左侧/右侧…）,
+    role: 画面角色（主要人物/次要人物/主要环境/场景结构 等）,
+    facing: 朝向（面向镜头/背对镜头/侧身/面向X 等，可 null）,
+    action: 动作（站立/坐着/行走/手持X…，可 null）
+  }，最多 6 个主体
+- relationships: 主体之间的关系列表，每个是一个中文短句，格式 "谁 动词 谁/什么"，
+  例如 "女性 面向 大海" / "两人 并排 坐着" / "咖啡杯 放在 桌上"。没有则空列表
+- environment: {location_type: 地点类型, weather: 天气, lighting: 光线, time_of_day: 时段}，未知为 null
+- composition: {shot_type: 景别（特写/半身/全身/全景）, subject_position: 主体位置, orientation: 横/竖, depth: 景深/前后景描述}，未知为 null
 - defects: 可见缺陷列表（过曝/欠曝/模糊/倾斜/遮挡/噪点 等），无则空列表
-- context: 一句话补充信息（可 null）
+- context: 一句话总描述（中文）
 - semantic_score: 0-100 的"观察质量"分（画面清晰、主体明确、缺陷少的程度）
 - score_components: 可选，各分项 {clarity, subject, defects_avoided}
 ）示例：
-{"scene": "风景", "subjects": ["山脉", "湖泊"], "person": null,
- "defects": [], "context": "日出光线",
- "semantic_score": 82.0,
- "score_components": {"clarity": 85, "subject": 90, "defects_avoided": 78}}"""
+{"scene": "风景",
+ "subjects": [
+   {"name": "女性", "attributes": ["年轻", "白色连衣裙"], "position": "中央", "role": "主要人物", "facing": "背对镜头", "action": "站立"},
+   {"name": "大海", "attributes": ["平静"], "position": "背景", "role": "主要环境"},
+   {"name": "白色步道", "position": "前景到中央", "role": "场景结构"}],
+ "relationships": ["女性 站在 步道中央", "女性 面向 大海"],
+ "environment": {"location_type": "海边", "weather": "晴朗", "lighting": "自然光", "time_of_day": "白天"},
+ "composition": {"shot_type": "全身", "subject_position": "中央", "orientation": "横向", "depth": "明显前中后景"},
+ "defects": [],
+ "context": "一名女性独自站在海边步道上面向大海",
+ "semantic_score": 92.0,
+ "score_components": {"clarity": 90, "subject": 95, "defects_avoided": 92}}"""
 
 
 class SemanticError(RuntimeError):
@@ -212,6 +239,44 @@ def vlm_json_call(
     )
 
 
+def _subjects_to_flat(subjects: list) -> list[str]:
+    """v2 rich subject objects -> v1-style flat name list (compat)."""
+    out = []
+    for s in subjects or []:
+        if isinstance(s, dict):
+            name = s.get("name")
+            if name:
+                out.append(str(name))
+        elif s is not None:
+            out.append(str(s))
+    return out
+
+
+def _person_to_flat(subjects: list) -> str | None:
+    """Derive the v1 `person` string from v2 subject objects."""
+    person_words = ("女", "男", "人", "儿童", "小孩", "孩子", "宝宝", "老人",
+                    "女士", "先生", "女孩", "男孩", "女人", "男人", "情侣", "夫妻")
+    people = [
+        s for s in subjects or []
+        if isinstance(s, dict)
+        and any(w in str(s.get("name", "")) for w in person_words)
+        or isinstance(s, dict) and "人物" in str(s.get("role", ""))
+    ]
+    if not people:
+        return None
+    n = len(people)
+    poses = [str(s["action"]) for s in people if s.get("action")]
+    if poses:
+        return f"{n}人，" + "，".join(poses)
+    return f"{n}人"
+
+
+def _rel_text(data: dict) -> str | None:
+    """Flatten relationships for SQL LIKE coarse recall (M3.4)."""
+    rels = data.get("relationships") or []
+    return "; ".join(str(r) for r in rels) if rels else None
+
+
 def upsert_semantic(
     conn,
     photo_id: int,
@@ -220,17 +285,27 @@ def upsert_semantic(
     analysis_version: int,
     data: dict,
 ) -> None:
-    """Store one observation row (upsert on the 4-tuple key)."""
+    """Store one observation row (upsert on the 4-tuple key).
+
+    v2: the full profile is stored in `profile`; the flat v1 columns
+    (scene/subjects/person/defects/context/semantic_score) are DERIVED
+    from it so existing consumers keep reading them unchanged.
+    """
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     components = data.get("score_components")
+    subjects = data.get("subjects") or []
+    flat_subjects = _subjects_to_flat(subjects)
+    flat_person = data.get("person")
+    if flat_person is None:
+        flat_person = _person_to_flat(subjects)
     conn.execute(
         """
         INSERT INTO semantic_analysis (
           photo_id, model, prompt_version, analysis_version,
           scene, subjects, person, defects, context,
           semantic_score, score_components, raw_response, model_version,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          profile, rel_text, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (photo_id, model, prompt_version, analysis_version)
         DO UPDATE SET
           scene=excluded.scene,
@@ -242,6 +317,8 @@ def upsert_semantic(
           score_components=excluded.score_components,
           raw_response=excluded.raw_response,
           model_version=excluded.model_version,
+          profile=excluded.profile,
+          rel_text=excluded.rel_text,
           created_at=excluded.created_at
         """,
         (
@@ -250,14 +327,16 @@ def upsert_semantic(
             prompt_version,
             analysis_version,
             data.get("scene"),
-            json.dumps(data.get("subjects") or [], ensure_ascii=False),
-            data.get("person"),
+            json.dumps(flat_subjects, ensure_ascii=False),
+            flat_person,
             json.dumps(data.get("defects") or [], ensure_ascii=False),
             data.get("context"),
             float(data["semantic_score"]),
             json.dumps(components, ensure_ascii=False) if components else None,
             data.get("raw_response"),
             data.get("model_version"),
+            json.dumps(data, ensure_ascii=False),
+            _rel_text(data),
             now,
         ),
     )
@@ -282,7 +361,7 @@ def get_semantic(
     if row is None:
         return None
     out = dict(row)
-    for key in ("subjects", "defects", "score_components"):
+    for key in ("subjects", "defects", "score_components", "profile"):
         if out.get(key):
             try:
                 out[key] = json.loads(out[key])

@@ -19,8 +19,8 @@ from taste import (
     taste_bias,
 )
 
-PROMPT_VERSION = "m3c-v1"
-ANALYSIS_VERSION = "m3c-v1"
+PROMPT_VERSION = "m3c-v2"
+ANALYSIS_VERSION = "m3c-v2"
 
 
 @pytest.fixture
@@ -179,5 +179,5 @@ def test_profile_summary_empty(conn):
     assert "暂无用户决定" in profile_summary(build_taste_profile(conn))
 
 
-def test_schema_version_still_5(conn):
-    assert SCHEMA_VERSION == 5
+def test_schema_version_still_6(conn):
+    assert SCHEMA_VERSION == 6

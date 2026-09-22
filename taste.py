@@ -50,7 +50,7 @@ def _photo_facts(conn: sqlite3.Connection) -> dict:
         FROM semantic_analysis sa
         JOIN photos p ON p.photo_id = sa.photo_id
         LEFT JOIN quality q ON q.photo_id = sa.photo_id
-        WHERE sa.semantic_score IS NOT NULL
+        WHERE sa.prompt_version = 'm3c-v2' AND sa.semantic_score IS NOT NULL
         """
     ).fetchall()
     facts = {}
@@ -243,7 +243,7 @@ def rank_top_n(
         FROM semantic_analysis sa
         JOIN photos p ON p.photo_id = sa.photo_id
         LEFT JOIN quality q ON q.photo_id = sa.photo_id
-        WHERE sa.scene = ? AND sa.semantic_score IS NOT NULL
+        WHERE sa.prompt_version = 'm3c-v2' AND sa.scene = ? AND sa.semantic_score IS NOT NULL
         """,
         (scene,),
     ).fetchall()

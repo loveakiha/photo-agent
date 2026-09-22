@@ -364,6 +364,7 @@ def retrieve_candidates(conn: sqlite3.Connection, intent: dict,
                sa.semantic_score, sa.subjects
         FROM photos p
         LEFT JOIN semantic_analysis sa ON sa.photo_id = p.photo_id
+            AND sa.prompt_version = 'm3c-v2'
         WHERE {' AND '.join(where)}
         ORDER BY COALESCE(sa.semantic_score, 0) DESC, p.rel_path
         LIMIT ?
